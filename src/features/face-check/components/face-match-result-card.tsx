@@ -8,11 +8,10 @@ import type { FaceMatchResult } from "@/entities/employee";
 interface FaceMatchResultCardProps {
   result: FaceMatchResult | null;
   onReset: () => void;
-  onEnroll: () => Promise<boolean> | void;
   hasSnapshot: boolean;
 }
 
-export const FaceMatchResultCard = ({ result, onReset, onEnroll, hasSnapshot }: FaceMatchResultCardProps) => {
+export const FaceMatchResultCard = ({ result, onReset, hasSnapshot }: FaceMatchResultCardProps) => {
   const percentage = result ? Math.round(result.score * 100) : 0;
   const statusVariant = result?.status === "matched" ? "default" : "destructive";
 
@@ -36,7 +35,7 @@ export const FaceMatchResultCard = ({ result, onReset, onEnroll, hasSnapshot }: 
               <Progress value={percentage} className="h-2" />
               <p className="text-xs text-muted-foreground">{result.message}</p>
             </div>
-            {hasSnapshot ? (
+            {hasSnapshot && result.snapshotDataUrl ? (
               <div className="overflow-hidden rounded-xl border">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img src={result.snapshotDataUrl} alt="ภาพใบหน้า" className="h-48 w-full object-cover" />
@@ -44,15 +43,12 @@ export const FaceMatchResultCard = ({ result, onReset, onEnroll, hasSnapshot }: 
             ) : null}
           </div>
         ) : (
-          <p className="text-sm text-muted-foreground">ถ่ายภาพเพื่อดูผลลัพธ์ที่นี่</p>
+          <p className="text-sm text-muted-foreground">เริ่มตรวจจับเพื่อดูผลลัพธ์ที่นี่</p>
         )}
       </CardContent>
-      <CardFooter className="flex flex-wrap gap-3">
-        <Button variant="outline" onClick={onReset} className="flex-1" disabled={!result && !hasSnapshot}>
+      <CardFooter>
+        <Button variant="outline" onClick={onReset} className="w-full" disabled={!result && !hasSnapshot}>
           รีเซ็ตเซสชัน
-        </Button>
-        <Button onClick={onEnroll} disabled={!hasSnapshot} className="flex-1">
-          ใช้ภาพนี้เป็นฐานข้อมูล
         </Button>
       </CardFooter>
     </Card>

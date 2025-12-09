@@ -30,7 +30,7 @@ class SupabaseEmployeeRepository implements EmployeeRepository {
   async listEmployees(): Promise<Employee[]> {
     const client = getSupabaseClient();
     if (!client) {
-      throw new Error("Supabase is not configured.");
+      throw new Error("ยังไม่ได้ตั้งค่า Supabase");
     }
 
     const { data, error } = await client
@@ -68,7 +68,7 @@ class SupabaseEmployeeRepository implements EmployeeRepository {
   async recordCheckIn(event: FaceCheckEventPayload): Promise<void> {
     const client = getSupabaseClient();
     if (!client) {
-      throw new Error("Supabase is not configured.");
+      throw new Error("ยังไม่ได้ตั้งค่า Supabase");
     }
 
     const { error: insertError } = await client.from("face_check_events").insert({
@@ -98,7 +98,7 @@ class SupabaseEmployeeRepository implements EmployeeRepository {
   async upsertEmbedding(employeeId: string, embedding: FaceEmbedding): Promise<void> {
     const client = getSupabaseClient();
     if (!client) {
-      throw new Error("Supabase is not configured.");
+      throw new Error("ยังไม่ได้ตั้งค่า Supabase");
     }
 
     const { error } = await client

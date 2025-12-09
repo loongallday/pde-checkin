@@ -9,7 +9,7 @@ export interface FrameCaptureResult {
 
 const assertBrowser = () => {
   if (typeof window === "undefined") {
-    throw new Error("Face capture utilities can only run in the browser.");
+    throw new Error("เครื่องมือจับภาพใบหน้าสามารถทำงานได้เฉพาะในเบราว์เซอร์เท่านั้น");
   }
 };
 
@@ -22,7 +22,7 @@ const createWorkingCanvas = (width: number, height: number) => {
   const context = canvas.getContext("2d", { willReadFrequently: true });
 
   if (!context) {
-    throw new Error("Unable to prepare canvas context for face capture.");
+    throw new Error("ไม่สามารถเตรียม canvas context สำหรับการจับภาพใบหน้าได้");
   }
 
   return { canvas, context };
@@ -65,7 +65,7 @@ export const captureEmbeddingFromVideo = (
   options?: { width?: number; height?: number; jpegQuality?: number },
 ): FrameCaptureResult => {
   if (!video) {
-    throw new Error("Camera feed is not ready yet.");
+    throw new Error("สตรีมกล้องยังไม่พร้อม");
   }
 
   const width = options?.width ?? video.videoWidth ?? 640;
