@@ -16,22 +16,23 @@ interface FaceCaptureSectionProps {
   isDetecting: boolean;
   detectedFaces?: DetectedFace[];
   getVideoDimensions?: () => { width: number; height: number };
-  onInitializeCamera: () => Promise<void> | void;
+  livenessScore?: number;
+  onInitializeCamera: () => Promise<void | boolean>;
   onStartDetection: () => void;
   onStopDetection: () => void;
 }
 
 export const phaseLabel: Record<FaceCheckPhase, string> = {
-  idle: "พร้อม",
-  "loading-employees": "กำลังโหลดข้อมูลพนักงาน",
-  "loading-models": "กำลังโหลด AI Models...",
+  idle: "รอเริ่มต้น",
+  "loading-employees": "กำลังโหลดข้อมูล",
+  "loading-models": "กำลังโหลด AI...",
   "camera-initializing": "กำลังเตรียมกล้อง",
-  "camera-ready": "กล้องพร้อมใช้งาน",
-  detecting: "กำลังตรวจจับใบหน้า (AI)",
+  "camera-ready": "พร้อมตรวจจับ",
+  detecting: "🔍 กำลังสแกน...",
   capturing: "กำลังถ่ายภาพ",
-  verifying: "กำลังตรวจสอบใบหน้า",
-  matched: "พบความตรงกัน",
-  mismatch: "ตรวจพบความไม่ตรงกัน",
+  verifying: "กำลังตรวจสอบ",
+  matched: "✓ พบตรงกัน!",
+  cooldown: "⏳ รอสักครู่...",
   error: "ข้อผิดพลาด",
 };
 
@@ -42,14 +43,15 @@ export const FaceCaptureSection = ({
   isDetecting,
   detectedFaces = [],
   getVideoDimensions,
+  livenessScore = 0,
   onInitializeCamera,
   onStartDetection,
   onStopDetection,
 }: FaceCaptureSectionProps) => {
   const overlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const isCameraReady = phase === "camera-ready" || phase === "matched" || phase === "mismatch" || phase === "detecting";
-  const isProcessing = phase === "camera-initializing" || phase === "capturing" || phase === "verifying";
+  const isCameraReady = phase === "camera-ready" || phase === "matched" || phase === "cooldown" || phase === "detecting";
+  const isProcessing = phase === "camera-initializing" || phase === "capturing" || phase === "verifying" || phase === "loading-models" || phase === "loading-employees";
 
   // Draw face bounding boxes on overlay canvas
   const drawFaceOverlay = useCallback(() => {
@@ -60,12 +62,10 @@ export const FaceCaptureSection = ({
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    // Get container dimensions
     const rect = container.getBoundingClientRect();
     canvas.width = rect.width;
     canvas.height = rect.height;
 
-    // Clear previous drawings
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
     if (detectedFaces.length === 0 || !getVideoDimensions) return;
@@ -77,15 +77,13 @@ export const FaceCaptureSection = ({
     for (const face of detectedFaces) {
       const { boundingBox, employeeName, matchScore } = face;
       
-      // Scale coordinates to canvas
       const x = boundingBox.x * scaleX;
       const y = boundingBox.y * scaleY;
       const w = boundingBox.width * scaleX;
       const h = boundingBox.height * scaleY;
 
-      // Determine color based on match status
       const hasMatch = employeeName && matchScore && matchScore >= 0.7;
-      const borderColor = hasMatch ? "#22c55e" : "#3b82f6"; // green if matched, blue otherwise
+      const borderColor = hasMatch ? "#22c55e" : "#3b82f6";
       const bgColor = hasMatch ? "rgba(34, 197, 94, 0.15)" : "rgba(59, 130, 246, 0.1)";
 
       // Draw face bounding box
@@ -93,7 +91,6 @@ export const FaceCaptureSection = ({
       ctx.lineWidth = 3;
       ctx.fillStyle = bgColor;
       
-      // Rounded rectangle
       const radius = 12;
       ctx.beginPath();
       ctx.moveTo(x + radius, y);
@@ -110,8 +107,8 @@ export const FaceCaptureSection = ({
       ctx.stroke();
 
       // Draw corner accents
-      const cornerLength = Math.min(20, w * 0.15, h * 0.15);
-      ctx.lineWidth = 4;
+      const cornerLength = Math.min(25, w * 0.2, h * 0.2);
+      ctx.lineWidth = 5;
       ctx.lineCap = "round";
 
       // Top-left corner
@@ -144,7 +141,7 @@ export const FaceCaptureSection = ({
 
       // Draw name label if available
       if (employeeName) {
-        const fontSize = Math.max(14, Math.min(20, w * 0.08));
+        const fontSize = Math.max(16, Math.min(24, w * 0.1));
         ctx.font = `bold ${fontSize}px Inter, system-ui, sans-serif`;
         
         const scoreText = matchScore ? ` ${Math.round(matchScore * 100)}%` : "";
@@ -152,14 +149,14 @@ export const FaceCaptureSection = ({
         const textMetrics = ctx.measureText(labelText);
         const textWidth = textMetrics.width;
         const textHeight = fontSize;
-        const padding = 8;
+        const padding = 10;
         const labelX = x;
-        const labelY = y - textHeight - padding * 2 - 4;
+        const labelY = y - textHeight - padding * 2 - 6;
 
         // Label background
         ctx.fillStyle = borderColor;
         ctx.beginPath();
-        const labelRadius = 6;
+        const labelRadius = 8;
         ctx.moveTo(labelX + labelRadius, labelY);
         ctx.lineTo(labelX + textWidth + padding * 2 - labelRadius, labelY);
         ctx.quadraticCurveTo(labelX + textWidth + padding * 2, labelY, labelX + textWidth + padding * 2, labelY + labelRadius);
@@ -180,90 +177,159 @@ export const FaceCaptureSection = ({
     }
   }, [detectedFaces, getVideoDimensions]);
 
-  // Update overlay when faces change
   useEffect(() => {
     drawFaceOverlay();
   }, [drawFaceOverlay]);
 
-  // Handle resize
   useEffect(() => {
     const handleResize = () => drawFaceOverlay();
     window.addEventListener("resize", handleResize);
     return () => window.removeEventListener("resize", handleResize);
   }, [drawFaceOverlay]);
 
+  const getBadgeVariant = () => {
+    if (phase === "matched" || phase === "cooldown") return "default";
+    if (phase === "error") return "destructive";
+    if (phase === "detecting") return "outline";
+    return "secondary";
+  };
+
   return (
     <Card className="overflow-hidden">
-      <CardHeader className="flex flex-row items-center justify-between">
+      <CardHeader className="flex flex-row items-center justify-between pb-2">
         <div>
-          <CardTitle>กล้องถ่ายทอดสด</CardTitle>
-          <CardDescription>เริ่มกล้องแล้วกดตรวจจับเพื่อค้นหาพนักงานอัตโนมัติ</CardDescription>
+          <CardTitle className="text-lg">กล้องเช็คชื่อ</CardTitle>
+          <CardDescription>เดินผ่านหน้ากล้องเพื่อเช็คชื่ออัตโนมัติ</CardDescription>
         </div>
         <Badge 
-          variant={phase === "matched" ? "default" : phase === "mismatch" ? "destructive" : phase === "detecting" ? "outline" : "secondary"}
-          className={cn(phase === "detecting" && "animate-pulse")}
+          variant={getBadgeVariant()}
+          className={cn(
+            "text-sm",
+            phase === "detecting" && "animate-pulse bg-blue-100 text-blue-700 border-blue-300",
+            phase === "matched" && "bg-green-500",
+            phase === "cooldown" && "bg-yellow-500"
+          )}
         >
           {phaseLabel[phase]}
         </Badge>
       </CardHeader>
-      <CardContent className="space-y-4">
+      <CardContent className="space-y-3 pt-2">
         {!isCameraSupported ? (
           <Alert variant="destructive">
             <AlertTitle>ไม่สามารถใช้กล้องได้</AlertTitle>
             <AlertDescription>
-              อุปกรณ์นี้ไม่สามารถเข้าถึงกล้องได้ กรุณาเชื่อมต่อเว็บแคมหรือใช้อุปกรณ์มือถือเพื่อทำการเช็คชื่อ
+              อุปกรณ์นี้ไม่สามารถเข้าถึงกล้องได้
             </AlertDescription>
           </Alert>
         ) : (
-          <div className="space-y-4">
+          <div className="space-y-3">
             <div 
               ref={containerRef}
-              className="relative aspect-[3/2] w-full overflow-hidden rounded-xl border bg-muted"
+              className="relative aspect-video w-full overflow-hidden rounded-xl border-2 border-muted bg-black"
             >
               <video
                 ref={videoRef}
-                className={cn("h-full w-full object-cover", !isCameraReady && "opacity-80 grayscale")}
+                className={cn(
+                  "h-full w-full object-cover",
+                  !isCameraReady && "opacity-50 grayscale"
+                )}
                 playsInline
                 muted
               />
+              
               {/* Face overlay canvas */}
               <canvas
                 ref={overlayCanvasRef}
                 className="pointer-events-none absolute inset-0 h-full w-full"
               />
-              {!isCameraReady ? (
-                <div className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground">
-                  กล้องยังไม่พร้อมใช้งาน
+              
+              {/* Loading/Initializing overlay */}
+              {isProcessing && (
+                <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/50 text-white">
+                  <div className="h-12 w-12 animate-spin rounded-full border-4 border-white/30 border-t-white" />
+                  <p className="mt-4 text-sm font-medium">{phaseLabel[phase]}</p>
                 </div>
-              ) : null}
-              {isDetecting && detectedFaces.length === 0 ? (
+              )}
+              
+              {/* Scanning animation when detecting but no face */}
+              {isDetecting && detectedFaces.length === 0 && !isProcessing && (
                 <div className="absolute inset-0 flex items-center justify-center">
-                  <div className="rounded-full border-4 border-primary/50 p-8 animate-pulse">
-                    <div className="h-32 w-32 rounded-full border-4 border-dashed border-primary animate-spin" style={{ animationDuration: "3s" }} />
+                  <div className="relative">
+                    <div className="h-48 w-48 rounded-full border-4 border-dashed border-blue-400/50 animate-spin" style={{ animationDuration: "4s" }} />
+                    <div className="absolute inset-4 rounded-full border-4 border-blue-400/30 animate-pulse" />
+                    <div className="absolute inset-0 flex items-center justify-center">
+                      <span className="text-blue-400 text-sm font-medium">กรุณาหันหน้าเข้าหากล้อง</span>
+                    </div>
                   </div>
                 </div>
-              ) : null}
-              {/* Face detection indicator */}
-              {isDetecting && detectedFaces.length > 0 && (
-                <div className="absolute bottom-3 left-3 rounded-full bg-green-500/90 px-3 py-1 text-xs font-medium text-white shadow-lg">
-                  ตรวจพบใบหน้า
+              )}
+              
+              {/* Status indicators */}
+              <div className="absolute bottom-3 left-3 right-3 flex items-center justify-between">
+                {/* Face detected indicator */}
+                {isDetecting && detectedFaces.length > 0 && (
+                  <div className="rounded-full bg-green-500/90 px-3 py-1.5 text-xs font-medium text-white shadow-lg flex items-center gap-1.5">
+                    <span className="h-2 w-2 rounded-full bg-white animate-pulse" />
+                    ตรวจพบใบหน้า
+                  </div>
+                )}
+                
+                {/* Liveness indicator */}
+                {isDetecting && detectedFaces.length > 0 && (
+                  <div className="rounded-full bg-black/60 px-3 py-1.5 text-xs text-white shadow-lg flex items-center gap-2">
+                    <span>ความปลอดภัย</span>
+                    <div className="w-12 h-1.5 bg-white/30 rounded-full overflow-hidden">
+                      <div 
+                        className={cn(
+                          "h-full rounded-full transition-all duration-300",
+                          livenessScore >= 0.5 ? "bg-green-400" : "bg-yellow-400"
+                        )}
+                        style={{ width: `${livenessScore * 100}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+              
+              {/* Cooldown overlay */}
+              {phase === "cooldown" && (
+                <div className="absolute inset-0 flex items-center justify-center bg-green-500/20">
+                  <div className="text-center">
+                    <div className="text-6xl mb-2">✓</div>
+                    <p className="text-white text-lg font-bold drop-shadow-lg">เช็คชื่อสำเร็จ!</p>
+                    <p className="text-white/80 text-sm">กลับไปสแกนใน 5 วินาที...</p>
+                  </div>
                 </div>
               )}
             </div>
-            <div className="flex flex-wrap gap-3">
-              <Button onClick={onInitializeCamera} disabled={isProcessing || isDetecting} variant="outline">
-                {isCameraReady ? "เริ่มกล้องใหม่" : "เริ่มกล้อง"}
-              </Button>
-              {isDetecting ? (
-                <Button onClick={onStopDetection} variant="destructive">
-                  หยุดตรวจจับ
+            
+            {/* Manual controls - minimal since we auto-start */}
+            <div className="flex flex-wrap gap-2">
+              {!isCameraReady && !isProcessing && (
+                <Button 
+                  onClick={() => void onInitializeCamera()} 
+                  size="sm"
+                  className="flex-1"
+                >
+                  เริ่มกล้อง
                 </Button>
-              ) : (
+              )}
+              {isCameraReady && !isDetecting && phase !== "cooldown" && (
                 <Button 
                   onClick={onStartDetection} 
-                  disabled={!isCameraReady || isProcessing || phase === "matched"}
+                  size="sm"
+                  className="flex-1"
                 >
-                  {isProcessing ? "กำลังประมวลผล" : "เริ่มตรวจจับใบหน้า"}
+                  เริ่มตรวจจับ
+                </Button>
+              )}
+              {isDetecting && (
+                <Button 
+                  onClick={onStopDetection} 
+                  variant="outline"
+                  size="sm"
+                >
+                  หยุด
                 </Button>
               )}
             </div>

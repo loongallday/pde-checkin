@@ -1,3 +1,4 @@
+import * as faceapi from "face-api.js";
 import {
   detectSingleFaceWithDescriptor,
   detectFacesFast,
@@ -22,6 +23,7 @@ export interface FrameCaptureResult {
   faceDetected: boolean;
   boundingBox?: FaceBoundingBox;
   confidence?: number;
+  landmarks?: faceapi.FaceLandmarks68;
 }
 
 // Face detection result for UI overlay
@@ -100,6 +102,7 @@ export const captureEmbeddingFromVideoAsync = async (
       faceDetected: true,
       boundingBox: detection.box,
       confidence: detection.score,
+      landmarks: detection.landmarks,
     };
   }
 

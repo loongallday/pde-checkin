@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef } from "react";
 import type { RefObject } from "react";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
@@ -16,16 +16,14 @@ import {
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { toast } from "@/components/ui/sonner";
 import { AppShell } from "@/shared/components/app-shell";
 import { InlineError } from "@/shared/components/feedback/inline-error";
-import { formatRelativeTime } from "@/shared/lib/datetime";
 import type { FaceMatchResult, Employee } from "@/entities/employee";
 import type { EmployeeRepositoryKind } from "@/shared/repositories/employee-repository";
-import type { FaceCheckPhase } from "../hooks/use-face-check-view-model";
+import type { FaceCheckPhase, CheckInLogEntry } from "../hooks/use-face-check-view-model";
 import type { DetectedFace } from "@/shared/lib/face-embedding";
 import { FaceCaptureSection, phaseLabel } from "./face-capture-section";
-import { FaceMatchResultCard } from "./face-match-result-card";
-import { Input } from "@/components/ui/input";
 
 interface FaceCheckViewProps {
   employees: Employee[];
@@ -37,23 +35,23 @@ interface FaceCheckViewProps {
     isCameraSupported: boolean;
     isDetecting: boolean;
     modelsReady: boolean;
+    livenessScore: number;
   };
   videoRef: RefObject<HTMLVideoElement | null>;
   matchResult: FaceMatchResult | null;
   snapshot: string | null;
   error: string | null;
   detectedFaces: DetectedFace[];
+  checkInLogs: CheckInLogEntry[];
   getVideoDimensions: () => { width: number; height: number };
   actions: {
-    initializeCamera: () => Promise<void> | void;
+    initializeCamera: () => Promise<void | boolean>;
     startDetection: () => void;
     stopDetection: () => void;
-    confirmCheckIn: () => Promise<boolean>;
     captureForEnrollment: () => Promise<boolean>;
     enrollFromLastCapture: (employeeId: string) => Promise<boolean>;
     stopCamera: () => void;
     resetSession: () => void;
-    addTestEmployee: (name: string) => Promise<Employee | null>;
   };
 }
 
@@ -72,100 +70,84 @@ export const FaceCheckView = ({
   snapshot,
   error,
   detectedFaces,
+  checkInLogs,
   getVideoDimensions,
   actions,
 }: FaceCheckViewProps) => {
-  const [selectedEmployeeForEnroll, setSelectedEmployeeForEnroll] = useState<string>("");
-  const [showEnrollment, setShowEnrollment] = useState(false);
-  const [showDevTools, setShowDevTools] = useState(false);
-  const [newEmployeeName, setNewEmployeeName] = useState("");
-  const [isAddingEmployee, setIsAddingEmployee] = useState(false);
+  const lastMatchRef = useRef<string | null>(null);
 
-  const repositoryDescription =
-    repositoryKind === "supabase"
-      ? "ข้อมูลแบบเรียลไทม์ผ่าน Supabase — เพิ่มข้อมูลประจำตัวของคุณใน NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY"
-      : "ใช้ข้อมูลจำลองในเครื่องเพื่อทดสอบเวิร์กโฟลว์โดยไม่ต้องใช้ข้อมูลประจำตัว";
+  // Show toast on successful check-in
+  useEffect(() => {
+    if (matchResult && status.phase === "matched" && matchResult.employeeId !== lastMatchRef.current) {
+      lastMatchRef.current = matchResult.employeeId;
+      
+      toast.success(`เช็คชื่อสำเร็จ!`, {
+        description: `${detectedEmployee?.fullName || "พนักงาน"} - ${Math.round(matchResult.score * 100)}% ตรงกัน`,
+        duration: 4000,
+      });
+    }
+  }, [matchResult, status.phase, detectedEmployee]);
+
+  // Reset last match when going back to detecting
+  useEffect(() => {
+    if (status.phase === "detecting") {
+      lastMatchRef.current = null;
+    }
+  }, [status.phase]);
 
   const enrolledCount = employees.filter((emp) => emp.embedding?.vector?.length).length;
-
-  const handleConfirmCheckIn = () => {
-    void actions.confirmCheckIn();
-  };
-
-  const handleEnroll = () => {
-    if (selectedEmployeeForEnroll) {
-      void actions.enrollFromLastCapture(selectedEmployeeForEnroll);
-    }
-  };
-
-  const handleCaptureForEnrollment = () => {
-    void actions.captureForEnrollment();
-  };
-
-  const handleAddTestEmployee = async () => {
-    if (!newEmployeeName.trim()) return;
-    setIsAddingEmployee(true);
-    try {
-      const result = await actions.addTestEmployee(newEmployeeName.trim());
-      if (result) {
-        setNewEmployeeName("");
-      }
-    } finally {
-      setIsAddingEmployee(false);
-    }
-  };
 
   return (
     <AppShell
       title="ระบบเช็คชื่อด้วยใบหน้า"
-      subtitle="เริ่มกล้องและกดตรวจจับเพื่อค้นหาพนักงานอัตโนมัติ"
+      subtitle="เดินผ่านหน้ากล้องเพื่อเช็คชื่ออัตโนมัติ"
       rightSlot={
-        <Badge variant="outline" className="text-xs">
-          {repositoryLabel[repositoryKind]}
-        </Badge>
+        <div className="flex items-center gap-2">
+          {status.modelsReady && (
+            <Badge variant="outline" className="bg-green-50 text-green-700 border-green-200">
+              AI พร้อม
+            </Badge>
+          )}
+          <Badge variant="outline" className="text-xs">
+            {repositoryLabel[repositoryKind]}
+          </Badge>
+        </div>
       }
     >
       <div className="space-y-4">
-        {/* Detected Employee Card - Shows when a match is found */}
-        {detectedEmployee && status.phase === "matched" ? (
-          <Card className="border-green-500 bg-green-50 dark:bg-green-950/20">
-            <CardHeader>
-              <CardTitle className="text-green-700 dark:text-green-400">ตรวจพบพนักงาน</CardTitle>
-              <CardDescription>ระบบตรวจพบพนักงานที่ตรงกันกับใบหน้าในกล้อง</CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="flex items-center gap-4 rounded-lg border border-green-200 bg-white p-4 dark:border-green-800 dark:bg-background">
-                <Avatar className="h-16 w-16">
-                  <AvatarImage src={detectedEmployee.avatarUrl} alt={detectedEmployee.fullName} />
-                  <AvatarFallback className="text-lg">{detectedEmployee.fullName.slice(0, 2).toUpperCase()}</AvatarFallback>
-                </Avatar>
+        {/* Success Card - Shows briefly after check-in */}
+        {detectedEmployee && (status.phase === "matched" || status.phase === "cooldown") && (
+          <Card className="border-green-500 bg-gradient-to-r from-green-50 to-emerald-50 dark:from-green-950/30 dark:to-emerald-950/30">
+            <CardContent className="pt-6">
+              <div className="flex items-center gap-4">
+                <div className="relative">
+                  <Avatar className="h-20 w-20 ring-4 ring-green-500 ring-offset-2">
+                    <AvatarImage src={detectedEmployee.avatarUrl} alt={detectedEmployee.fullName} />
+                    <AvatarFallback className="text-2xl bg-green-100 text-green-700">
+                      {detectedEmployee.fullName.slice(0, 2).toUpperCase()}
+                    </AvatarFallback>
+                  </Avatar>
+                  <div className="absolute -bottom-1 -right-1 h-6 w-6 rounded-full bg-green-500 flex items-center justify-center">
+                    <svg className="h-4 w-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
+                    </svg>
+                  </div>
+                </div>
                 <div className="flex-1">
-                  <p className="text-lg font-semibold text-foreground">{detectedEmployee.fullName}</p>
-                  <p className="text-sm text-muted-foreground">
-                    {detectedEmployee.role}
-                    {detectedEmployee.department ? ` · ${detectedEmployee.department}` : null}
+                  <p className="text-2xl font-bold text-green-700 dark:text-green-400">
+                    {detectedEmployee.fullName}
                   </p>
-                  <p className="text-sm text-muted-foreground">
-                    เช็คชื่อล่าสุด · {formatRelativeTime(detectedEmployee.lastCheckIn)}
+                  <p className="text-sm text-green-600 dark:text-green-500">
+                    {detectedEmployee.role} · {detectedEmployee.department}
+                  </p>
+                  <p className="text-sm font-medium text-green-600 dark:text-green-500 mt-1">
+                    ✓ เช็คชื่อสำเร็จ {matchResult && `(${Math.round(matchResult.score * 100)}%)`}
                   </p>
                 </div>
-                {matchResult && (
-                  <Badge variant="default" className="bg-green-600">
-                    {Math.round(matchResult.score * 100)}% ตรงกัน
-                  </Badge>
-                )}
-              </div>
-              <div className="flex gap-3">
-                <Button onClick={handleConfirmCheckIn} className="flex-1 bg-green-600 hover:bg-green-700">
-                  ยืนยันเช็คชื่อ
-                </Button>
-                <Button onClick={actions.resetSession} variant="outline" className="flex-1">
-                  ยกเลิก
-                </Button>
               </div>
             </CardContent>
           </Card>
-        ) : null}
+        )}
 
         <FaceCaptureSection
           videoRef={videoRef}
@@ -174,6 +156,7 @@ export const FaceCheckView = ({
           isDetecting={status.isDetecting}
           detectedFaces={detectedFaces}
           getVideoDimensions={getVideoDimensions}
+          livenessScore={status.livenessScore}
           onInitializeCamera={actions.initializeCamera}
           onStartDetection={actions.startDetection}
           onStopDetection={actions.stopDetection}
@@ -181,130 +164,54 @@ export const FaceCheckView = ({
 
         <InlineError message={error ?? ""} />
 
-        {/* Enrollment Section - Collapsible */}
+        {/* Check-in Logs */}
         <Card>
-          <CardHeader 
-            className="cursor-pointer" 
-            onClick={() => setShowEnrollment(!showEnrollment)}
-          >
-            <div className="flex items-center justify-between">
-              <div>
-                <CardTitle className="text-base">ลงทะเบียนใบหน้าใหม่</CardTitle>
-                <CardDescription>
-                  สำหรับพนักงานที่ยังไม่มีข้อมูลใบหน้า ({employees.length - enrolledCount} คนยังไม่ลงทะเบียน)
-                </CardDescription>
-              </div>
-              <Badge variant="secondary">
-                {showEnrollment ? "ซ่อน" : "แสดง"}
-              </Badge>
-            </div>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <span>📋</span>
+              ประวัติเช็คชื่อวันนี้
+            </CardTitle>
+            <CardDescription>
+              {checkInLogs.length > 0 ? `${checkInLogs.length} รายการ` : "ยังไม่มีการเช็คชื่อ"}
+            </CardDescription>
           </CardHeader>
-          {showEnrollment && (
-            <CardContent className="space-y-4">
-              <div className="space-y-2">
-                <Label htmlFor="employee-enroll">เลือกพนักงานที่ต้องการลงทะเบียน</Label>
-                <Select value={selectedEmployeeForEnroll} onValueChange={setSelectedEmployeeForEnroll}>
-                  <SelectTrigger id="employee-enroll" className="w-full">
-                    <SelectValue placeholder="เลือกพนักงาน" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {employees.map((employee) => (
-                      <SelectItem key={employee.id} value={employee.id}>
-                        {employee.fullName} {employee.embedding ? "(ลงทะเบียนแล้ว)" : ""}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="flex gap-3">
-                <Button 
-                  onClick={handleCaptureForEnrollment} 
-                  variant="outline"
-                  disabled={!selectedEmployeeForEnroll || status.phase !== "camera-ready"}
-                >
-                  ถ่ายภาพ
-                </Button>
-                <Button 
-                  onClick={handleEnroll} 
-                  disabled={!selectedEmployeeForEnroll || !snapshot}
-                >
-                  บันทึกใบหน้า
-                </Button>
-              </div>
-              {snapshot && selectedEmployeeForEnroll && (
-                <div className="overflow-hidden rounded-xl border">
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={snapshot} alt="ภาพถ่ายสำหรับลงทะเบียน" className="h-48 w-full object-cover" />
-                </div>
-              )}
-            </CardContent>
-          )}
-        </Card>
-
-        {/* Dev Tools Section - For testing */}
-        <Card className="border-dashed border-amber-500/50">
-          <CardHeader 
-            className="cursor-pointer" 
-            onClick={() => setShowDevTools(!showDevTools)}
-          >
-            <div className="flex items-center justify-between">
-              <div>
-                <CardTitle className="text-base flex items-center gap-2">
-                  <span className="text-amber-500">🛠️</span>
-                  เครื่องมือพัฒนา (Dev Tools)
-                </CardTitle>
-                <CardDescription>
-                  เพิ่มพนักงานทดสอบพร้อมข้อมูลใบหน้าจากกล้อง
-                </CardDescription>
-              </div>
-              <Badge variant="outline" className="border-amber-500/50 text-amber-600">
-                {showDevTools ? "ซ่อน" : "แสดง"}
-              </Badge>
-            </div>
-          </CardHeader>
-          {showDevTools && (
-            <CardContent className="space-y-4">
-              <Alert className="border-amber-500/30 bg-amber-50 dark:bg-amber-950/20">
-                <AlertTitle className="text-amber-700 dark:text-amber-400">สำหรับการทดสอบเท่านั้น</AlertTitle>
-                <AlertDescription className="text-amber-600 dark:text-amber-500">
-                  ฟีเจอร์นี้จะเพิ่มพนักงานใหม่พร้อมลงทะเบียนใบหน้าจากกล้องทันที เหมาะสำหรับทดสอบระบบ
-                </AlertDescription>
-              </Alert>
-              <div className="space-y-2">
-                <Label htmlFor="new-employee-name">ชื่อพนักงานทดสอบ</Label>
-                <div className="flex gap-3">
-                  <Input
-                    id="new-employee-name"
-                    placeholder="เช่น สมชาย ใจดี"
-                    value={newEmployeeName}
-                    onChange={(e) => setNewEmployeeName(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") {
-                        void handleAddTestEmployee();
-                      }
-                    }}
-                  />
-                  <Button 
-                    onClick={() => void handleAddTestEmployee()}
-                    disabled={!newEmployeeName.trim() || isAddingEmployee || status.phase !== "camera-ready"}
-                    className="bg-amber-500 hover:bg-amber-600 text-white"
+          {checkInLogs.length > 0 && (
+            <CardContent className="p-0">
+              <div className="max-h-[300px] overflow-y-auto">
+                {checkInLogs.map((log, index) => (
+                  <div
+                    key={log.id}
+                    className={`flex items-center gap-3 px-6 py-3 ${
+                      index !== checkInLogs.length - 1 ? "border-b" : ""
+                    }`}
                   >
-                    {isAddingEmployee ? "กำลังเพิ่ม..." : "เพิ่ม + ลงทะเบียนใบหน้า"}
-                  </Button>
-                </div>
+                    <Avatar className="h-10 w-10">
+                      <AvatarImage src={log.avatarUrl} alt={log.employeeName} />
+                      <AvatarFallback>{log.employeeName.slice(0, 2).toUpperCase()}</AvatarFallback>
+                    </Avatar>
+                    <div className="flex-1 min-w-0">
+                      <p className="font-medium truncate">{log.employeeName}</p>
+                      <p className="text-xs text-muted-foreground">
+                        {log.timestamp.toLocaleTimeString("th-TH", {
+                          hour: "2-digit",
+                          minute: "2-digit",
+                          second: "2-digit",
+                        })}
+                      </p>
+                    </div>
+                    <Badge variant="secondary" className="text-xs">
+                      {Math.round(log.similarity * 100)}%
+                    </Badge>
+                  </div>
+                ))}
               </div>
-              {snapshot && newEmployeeName && (
-                <div className="overflow-hidden rounded-xl border border-amber-500/30">
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={snapshot} alt="ภาพถ่ายสำหรับทดสอบ" className="h-48 w-full object-cover" />
-                </div>
-              )}
             </CardContent>
           )}
         </Card>
       </div>
 
       <div className="space-y-4">
+        {/* Status Card */}
         <Card>
           <CardHeader>
             <CardTitle>สถานะระบบ</CardTitle>
@@ -317,49 +224,152 @@ export const FaceCheckView = ({
             </div>
             <Separator />
             <div className="flex items-center justify-between">
-              <span>ข้อมูลพนักงาน</span>
-              <span className="font-medium text-foreground">
-                {status.isLoadingEmployees ? "กำลังโหลด" : `${employees.length} คน`}
+              <span>AI Models</span>
+              <span className={`font-medium ${status.modelsReady ? "text-green-600" : "text-yellow-600"}`}>
+                {status.modelsReady ? "พร้อมใช้งาน" : "กำลังโหลด..."}
               </span>
             </div>
             <Separator />
             <div className="flex items-center justify-between">
-              <span>ลงทะเบียนใบหน้าแล้ว</span>
+              <span>การป้องกันรูปภาพ</span>
+              <div className="flex items-center gap-2">
+                <div className="w-16 h-2 bg-muted rounded-full overflow-hidden">
+                  <div 
+                    className="h-full bg-green-500 transition-all duration-300"
+                    style={{ width: `${status.livenessScore * 100}%` }}
+                  />
+                </div>
+                <span className="font-medium text-foreground text-xs">
+                  {Math.round(status.livenessScore * 100)}%
+                </span>
+              </div>
+            </div>
+            <Separator />
+            <div className="flex items-center justify-between">
+              <span>พนักงานลงทะเบียนแล้ว</span>
               <span className="font-medium text-foreground">
                 {enrolledCount} / {employees.length} คน
               </span>
             </div>
             <Separator />
-            <div className="space-y-1">
-              <span className="text-xs uppercase tracking-wide text-muted-foreground">แหล่งข้อมูล</span>
-              <p className="text-sm text-foreground">{repositoryLabel[repositoryKind]}</p>
-              <p className="text-xs text-muted-foreground">{repositoryDescription}</p>
+            <div className="flex items-center justify-between">
+              <span>เช็คชื่อวันนี้</span>
+              <span className="font-medium text-foreground">
+                {checkInLogs.length} ครั้ง
+              </span>
             </div>
           </CardContent>
         </Card>
 
-        <FaceMatchResultCard
-          result={matchResult}
-          onReset={actions.resetSession}
-          hasSnapshot={Boolean(snapshot)}
-        />
+        {/* Enrollment Section - Only show if no enrolled employees */}
+        {enrolledCount === 0 && (
+          <EnrollmentSection
+            employees={employees}
+            snapshot={snapshot}
+            phase={status.phase}
+            onCapture={actions.captureForEnrollment}
+            onEnroll={actions.enrollFromLastCapture}
+          />
+        )}
 
         {enrolledCount === 0 && (
           <Alert variant="destructive">
             <AlertTitle>ไม่มีพนักงานที่ลงทะเบียนใบหน้า</AlertTitle>
             <AlertDescription>
-              กรุณาลงทะเบียนใบหน้าพนักงานอย่างน้อย 1 คนก่อนใช้งานระบบตรวจจับอัตโนมัติ
+              กรุณาลงทะเบียนใบหน้าพนักงานอย่างน้อย 1 คนก่อนใช้งานระบบ
             </AlertDescription>
           </Alert>
         )}
-
-        <Alert>
-          <AlertTitle>ต้องใช้ข้อมูลประจำตัว Supabase</AlertTitle>
-          <AlertDescription>
-            ตั้งค่า NEXT_PUBLIC_SUPABASE_URL และ NEXT_PUBLIC_SUPABASE_ANON_KEY แล้วรีสตาร์ทเซิร์ฟเวอร์เพื่อบันทึกการเช็คชื่อแบบออนไลน์
-          </AlertDescription>
-        </Alert>
       </div>
     </AppShell>
   );
 };
+
+// Enrollment Section Component
+interface EnrollmentSectionProps {
+  employees: Employee[];
+  snapshot: string | null;
+  phase: FaceCheckPhase;
+  onCapture: () => Promise<boolean>;
+  onEnroll: (employeeId: string) => Promise<boolean>;
+}
+
+const EnrollmentSection = ({
+  employees,
+  snapshot,
+  phase,
+  onCapture,
+  onEnroll,
+}: EnrollmentSectionProps) => {
+  const [selectedEmployeeForEnroll, setSelectedEmployeeForEnroll] = React.useState<string>("");
+
+  const handleCapture = () => {
+    void onCapture();
+  };
+
+  const handleEnroll = async () => {
+    if (selectedEmployeeForEnroll) {
+      const success = await onEnroll(selectedEmployeeForEnroll);
+      if (success) {
+        toast.success("ลงทะเบียนใบหน้าสำเร็จ!", {
+          description: "สามารถใช้งานระบบเช็คชื่อได้แล้ว",
+        });
+        setSelectedEmployeeForEnroll("");
+      }
+    }
+  };
+
+  const enrolledCount = employees.filter((emp) => emp.embedding?.vector?.length).length;
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">ลงทะเบียนใบหน้า</CardTitle>
+        <CardDescription>
+          ลงทะเบียนใบหน้าเพื่อใช้งานระบบ ({employees.length - enrolledCount} คนยังไม่ลงทะเบียน)
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="space-y-2">
+          <Label htmlFor="employee-enroll">เลือกพนักงาน</Label>
+          <Select value={selectedEmployeeForEnroll} onValueChange={setSelectedEmployeeForEnroll}>
+            <SelectTrigger id="employee-enroll" className="w-full">
+              <SelectValue placeholder="เลือกพนักงาน" />
+            </SelectTrigger>
+            <SelectContent>
+              {employees.map((employee) => (
+                <SelectItem key={employee.id} value={employee.id}>
+                  {employee.fullName} {employee.embedding ? "✓" : ""}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="flex gap-3">
+          <Button 
+            onClick={handleCapture} 
+            variant="outline"
+            disabled={!selectedEmployeeForEnroll || phase !== "camera-ready"}
+          >
+            ถ่ายภาพ
+          </Button>
+          <Button 
+            onClick={() => void handleEnroll()} 
+            disabled={!selectedEmployeeForEnroll || !snapshot}
+          >
+            บันทึกใบหน้า
+          </Button>
+        </div>
+        {snapshot && selectedEmployeeForEnroll && (
+          <div className="overflow-hidden rounded-xl border">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={snapshot} alt="ภาพถ่ายสำหรับลงทะเบียน" className="h-48 w-full object-cover" />
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+};
+
+// Need to import React for useState in EnrollmentSection
+import React from "react";

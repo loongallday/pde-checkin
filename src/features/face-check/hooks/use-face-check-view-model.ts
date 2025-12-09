@@ -3,7 +3,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   Employee,
-  FaceCheckEventPayload,
   FaceEmbedding,
   FaceMatchResult,
 } from "@/entities/employee";
@@ -16,6 +15,7 @@ import {
   initializeFaceDetection,
   type DetectedFace,
 } from "@/shared/lib/face-embedding";
+import { getLivenessDetector, resetLivenessDetector } from "@/shared/lib/liveness-detection";
 import type { EmployeeRepository } from "@/shared/repositories/employee-repository";
 
 export type FaceCheckPhase =
@@ -28,24 +28,39 @@ export type FaceCheckPhase =
   | "capturing"
   | "verifying"
   | "matched"
-  | "mismatch"
+  | "cooldown"
   | "error";
+
+// Check-in log entry
+export interface CheckInLogEntry {
+  id: string;
+  employeeId: string;
+  employeeName: string;
+  avatarUrl?: string;
+  timestamp: Date;
+  similarity: number;
+  snapshotUrl?: string;
+}
 
 interface UseFaceCheckViewModelOptions {
   repository: EmployeeRepository;
+  autoStart?: boolean; // Auto-start camera and detection
 }
 
-const DETECTION_INTERVAL_MS = 500; // Fast scanning with AI detection
-const FACE_OVERLAY_INTERVAL_MS = 150; // Face overlay updates
+const DETECTION_INTERVAL_MS = 400; // Fast scanning with AI detection
+const FACE_OVERLAY_INTERVAL_MS = 100; // Face overlay updates
+const CHECK_IN_COOLDOWN_MS = 5000; // 5 second cooldown after check-in
+const SAME_PERSON_COOLDOWN_MS = 30000; // 30 second cooldown for same person
 
 interface EmployeeMatch {
   employee: Employee;
-  distance: number;  // Euclidean distance (lower = better match)
-  similarity: number; // Converted to 0-1 scale for display
+  distance: number;
+  similarity: number;
 }
 
 export const useFaceCheckViewModel = ({
   repository,
+  autoStart = true, // Default to auto-start
 }: UseFaceCheckViewModelOptions) => {
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [detectedEmployee, setDetectedEmployee] = useState<Employee | null>(null);
@@ -57,57 +72,24 @@ export const useFaceCheckViewModel = ({
   const [snapshot, setSnapshot] = useState<string | null>(null);
   const [isDetecting, setIsDetecting] = useState(false);
   const [detectedFaces, setDetectedFaces] = useState<DetectedFace[]>([]);
+  const [modelsReady, setModelsReady] = useState(false);
+  const [checkInLogs, setCheckInLogs] = useState<CheckInLogEntry[]>([]);
+  const [livenessScore, setLivenessScore] = useState(0);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const latestEmbeddingRef = useRef<number[] | null>(null);
   const detectionIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const faceOverlayIntervalRef = useRef<NodeJS.Timeout | null>(null);
-
-  const [modelsReady, setModelsReady] = useState(false);
+  const cooldownTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const recentCheckIns = useRef<Map<string, number>>(new Map()); // employeeId -> timestamp
+  const initStartedRef = useRef(false);
 
   useEffect(() => {
     setIsCameraSupported(Boolean(navigator?.mediaDevices?.getUserMedia));
   }, []);
 
-  // Load face detection models on mount
-  useEffect(() => {
-    const loadModels = async () => {
-      setPhase("loading-models");
-      try {
-        const loaded = await initializeFaceDetection();
-        setModelsReady(loaded);
-        if (!loaded) {
-          console.warn("Face detection models failed to load - using fallback");
-        }
-      } catch (err) {
-        console.error("Failed to load face models:", err);
-      }
-      setPhase("idle");
-    };
-    loadModels();
-  }, []);
-
-  useEffect(() => {
-    const loadEmployees = async () => {
-      setIsLoadingEmployees(true);
-      setPhase("loading-employees");
-      setError(null);
-      try {
-        const data = await repository.listEmployees();
-        setEmployees(data);
-        setPhase("idle");
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "ไม่สามารถโหลดข้อมูลพนักงานได้");
-        setPhase("error");
-      } finally {
-        setIsLoadingEmployees(false);
-      }
-    };
-
-    loadEmployees();
-  }, [repository]);
-
+  // Stop detection
   const stopDetection = useCallback(() => {
     if (detectionIntervalRef.current) {
       clearInterval(detectionIntervalRef.current);
@@ -119,8 +101,10 @@ export const useFaceCheckViewModel = ({
     }
     setIsDetecting(false);
     setDetectedFaces([]);
+    resetLivenessDetector();
   }, []);
 
+  // Stop camera
   const stopCamera = useCallback(() => {
     stopDetection();
     streamRef.current?.getTracks().forEach((track) => track.stop());
@@ -130,8 +114,252 @@ export const useFaceCheckViewModel = ({
     }
   }, [stopDetection]);
 
+  // Cleanup on unmount
   useEffect(() => stopCamera, [stopCamera]);
 
+  // Find the best matching employee
+  const findBestMatch = useCallback((capturedEmbedding: number[]): EmployeeMatch | null => {
+    if (!capturedEmbedding || capturedEmbedding.length === 0) {
+      return null;
+    }
+
+    const enrolledEmployees = employees.filter(
+      (emp) => emp.embedding?.vector?.length
+    );
+
+    if (enrolledEmployees.length === 0) {
+      return null;
+    }
+
+    let bestMatch: EmployeeMatch | null = null;
+
+    for (const employee of enrolledEmployees) {
+      if (!employee.embedding?.vector || employee.embedding.vector.length === 0) continue;
+
+      const distance = compareFaces(capturedEmbedding, employee.embedding.vector);
+      const similarity = distanceToSimilarity(distance);
+
+      if (!bestMatch || distance < bestMatch.distance) {
+        bestMatch = { employee, distance, similarity };
+      }
+    }
+
+    return bestMatch;
+  }, [employees]);
+
+  // Check if employee is in cooldown
+  const isInCooldown = useCallback((employeeId: string): boolean => {
+    const lastCheckIn = recentCheckIns.current.get(employeeId);
+    if (!lastCheckIn) return false;
+    return Date.now() - lastCheckIn < SAME_PERSON_COOLDOWN_MS;
+  }, []);
+
+  // Add to check-in log
+  const addCheckInLog = useCallback((employee: Employee, similarity: number, snapshotUrl?: string) => {
+    const entry: CheckInLogEntry = {
+      id: `log_${Date.now()}`,
+      employeeId: employee.id,
+      employeeName: employee.fullName,
+      avatarUrl: employee.avatarUrl,
+      timestamp: new Date(),
+      similarity,
+      snapshotUrl,
+    };
+    setCheckInLogs((prev) => [entry, ...prev].slice(0, 50)); // Keep last 50 entries
+  }, []);
+
+  // Perform auto check-in (no confirmation needed)
+  const performAutoCheckIn = useCallback(async (
+    employee: Employee, 
+    similarity: number, 
+    snapshotDataUrl: string
+  ): Promise<boolean> => {
+    try {
+      // Record check-in
+      await repository.recordCheckIn({
+        employeeId: employee.id,
+        similarityScore: similarity,
+        isMatch: true,
+        capturedAt: new Date().toISOString(),
+        snapshotDataUrl,
+      });
+
+      // Add to log
+      addCheckInLog(employee, similarity, snapshotDataUrl);
+
+      // Record cooldown for this employee
+      recentCheckIns.current.set(employee.id, Date.now());
+
+      return true;
+    } catch (err) {
+      console.error("Auto check-in failed:", err);
+      return false;
+    }
+  }, [repository, addCheckInLog]);
+
+  // Ref to hold the detection function for cooldown restart
+  const autoDetectAndCheckInRef = useRef<(() => Promise<boolean>) | undefined>(undefined);
+
+  // Start detection after cooldown
+  const startDetectionAfterCooldown = useCallback(() => {
+    if (cooldownTimeoutRef.current) {
+      clearTimeout(cooldownTimeoutRef.current);
+    }
+
+    cooldownTimeoutRef.current = setTimeout(() => {
+      setPhase("detecting");
+      setDetectedEmployee(null);
+      setMatchResult(null);
+      setSnapshot(null);
+      resetLivenessDetector();
+      
+      // Restart detection interval
+      if (streamRef.current && videoRef.current && autoDetectAndCheckInRef.current) {
+        setIsDetecting(true);
+        detectionIntervalRef.current = setInterval(() => {
+          void autoDetectAndCheckInRef.current?.();
+        }, DETECTION_INTERVAL_MS);
+      }
+    }, CHECK_IN_COOLDOWN_MS);
+  }, []);
+
+  // Auto-detect and auto check-in
+  const autoDetectAndCheckIn = useCallback(async (): Promise<boolean> => {
+    try {
+      if (!videoRef.current || phase === "cooldown") {
+        return false;
+      }
+
+      const capture = await captureEmbeddingFromVideoAsync(videoRef.current);
+      
+      if (!capture.faceDetected || capture.embedding.length === 0) {
+        setDetectedFaces([]);
+        setLivenessScore(0);
+        return false;
+      }
+
+      // Update liveness detector
+      const livenessDetector = getLivenessDetector();
+      livenessDetector.addFrame(
+        capture.landmarks,
+        capture.boundingBox
+      );
+      const currentLivenessScore = livenessDetector.getLivenessScore();
+      setLivenessScore(currentLivenessScore);
+
+      const bestMatch = findBestMatch(capture.embedding);
+
+      // Update face overlay
+      if (capture.boundingBox) {
+        const showName = bestMatch && bestMatch.distance <= FACE_MATCH_THRESHOLD * 1.5;
+        setDetectedFaces([{
+          boundingBox: capture.boundingBox,
+          confidence: capture.confidence ?? 0.9,
+          employeeName: showName ? bestMatch.employee.fullName : undefined,
+          matchScore: bestMatch?.similarity,
+        }]);
+      }
+
+      if (!bestMatch) {
+        return false;
+      }
+
+      // Check if match meets threshold
+      if (bestMatch.distance <= FACE_MATCH_THRESHOLD) {
+        // Check liveness (anti-spoofing)
+        if (!livenessDetector.isLive()) {
+          // Not enough liveness evidence yet, continue scanning
+          return false;
+        }
+
+        // Check cooldown for this employee
+        if (isInCooldown(bestMatch.employee.id)) {
+          // Employee already checked in recently
+          return false;
+        }
+
+        // Match found! Perform auto check-in
+        stopDetection();
+        
+        latestEmbeddingRef.current = capture.embedding;
+        setSnapshot(capture.dataUrl);
+        setDetectedEmployee(bestMatch.employee);
+        setPhase("matched");
+
+        const newResult: FaceMatchResult = {
+          employeeId: bestMatch.employee.id,
+          capturedAt: new Date().toISOString(),
+          snapshotDataUrl: capture.dataUrl,
+          score: Number(bestMatch.similarity.toFixed(4)),
+          threshold: FACE_MATCH_THRESHOLD,
+          status: "matched",
+          message: `${bestMatch.employee.fullName} เช็คชื่อสำเร็จ!`,
+        };
+        setMatchResult(newResult);
+
+        // Auto check-in
+        await performAutoCheckIn(bestMatch.employee, bestMatch.similarity, capture.dataUrl);
+
+        // Start cooldown then resume detection
+        setPhase("cooldown");
+        startDetectionAfterCooldown();
+
+        return true;
+      }
+
+      return false;
+    } catch {
+      return false;
+    }
+  }, [phase, findBestMatch, isInCooldown, stopDetection, performAutoCheckIn, startDetectionAfterCooldown]);
+
+  // Keep ref updated
+  useEffect(() => {
+    autoDetectAndCheckInRef.current = autoDetectAndCheckIn;
+  }, [autoDetectAndCheckIn]);
+
+  // Start continuous face detection
+  const startDetection = useCallback(() => {
+    if (!streamRef.current || !videoRef.current) {
+      setError("กรุณาเริ่มกล้องก่อนตรวจจับใบหน้า");
+      return;
+    }
+
+    const enrolledCount = employees.filter((emp) => emp.embedding?.vector?.length).length;
+    if (enrolledCount === 0) {
+      setError("ไม่มีพนักงานที่ลงทะเบียนใบหน้าไว้");
+      return;
+    }
+
+    setError(null);
+    setIsDetecting(true);
+    setPhase("detecting");
+    setDetectedEmployee(null);
+    setMatchResult(null);
+    resetLivenessDetector();
+
+    // Start face overlay updates
+    faceOverlayIntervalRef.current = setInterval(() => {
+      void detectFacesInVideo(videoRef.current!).then((faces) => {
+        if (faces.length > 0) {
+          setDetectedFaces((prev) => prev.length > 0 ? prev : faces.map((boundingBox) => ({
+            boundingBox,
+            confidence: 0.9,
+          })));
+        }
+      });
+    }, FACE_OVERLAY_INTERVAL_MS);
+
+    // Start detection loop
+    detectionIntervalRef.current = setInterval(() => {
+      void autoDetectAndCheckIn();
+    }, DETECTION_INTERVAL_MS);
+
+    // Run first detection immediately
+    void autoDetectAndCheckIn();
+  }, [employees, autoDetectAndCheckIn]);
+
+  // Initialize camera
   const initializeCamera = useCallback(async () => {
     if (!navigator?.mediaDevices?.getUserMedia) {
       setError("อุปกรณ์นี้ไม่รองรับกล้อง");
@@ -158,6 +386,7 @@ export const useFaceCheckViewModel = ({
 
       streamRef.current = stream;
       setPhase("camera-ready");
+      return true;
     } catch (err) {
       setPhase("error");
       setError(
@@ -165,219 +394,70 @@ export const useFaceCheckViewModel = ({
           ? err.message
           : "ไม่สามารถเข้าถึงสตรีมกล้องได้",
       );
+      return false;
     }
   }, []);
 
-  const buildEventPayload = useCallback(
-    (employeeId: string, similarityScore: number, isMatch: boolean, snapshotDataUrl?: string): FaceCheckEventPayload => ({
-      employeeId,
-      similarityScore,
-      isMatch,
-      capturedAt: new Date().toISOString(),
-      snapshotDataUrl,
-    }),
-    [],
-  );
-
-  // Find the best matching employee from all enrolled employees using euclidean distance
-  const findBestMatch = useCallback((capturedEmbedding: number[]): EmployeeMatch | null => {
-    if (!capturedEmbedding || capturedEmbedding.length === 0) {
-      return null;
-    }
-
-    const enrolledEmployees = employees.filter(
-      (emp) => emp.embedding?.vector?.length
-    );
-
-    if (enrolledEmployees.length === 0) {
-      return null;
-    }
-
-    let bestMatch: EmployeeMatch | null = null;
-
-    for (const employee of enrolledEmployees) {
-      if (!employee.embedding?.vector || employee.embedding.vector.length === 0) continue;
-
-      // Use euclidean distance - lower is better
-      const distance = compareFaces(capturedEmbedding, employee.embedding.vector);
-      const similarity = distanceToSimilarity(distance);
-
-      // Best match has lowest distance
-      if (!bestMatch || distance < bestMatch.distance) {
-        bestMatch = { employee, distance, similarity };
+  // Load models and employees on mount
+  useEffect(() => {
+    const loadModels = async () => {
+      setPhase("loading-models");
+      try {
+        const loaded = await initializeFaceDetection();
+        setModelsReady(loaded);
+        if (!loaded) {
+          console.warn("Face detection models failed to load");
+        }
+      } catch (err) {
+        console.error("Failed to load face models:", err);
       }
-    }
+    };
+    loadModels();
+  }, []);
 
-    return bestMatch;
-  }, [employees]);
-
-  // Update face overlay with current detection
-  const updateFaceOverlay = useCallback(async () => {
-    try {
-      if (!videoRef.current) return;
-      
-      const faces = await detectFacesInVideo(videoRef.current);
-      if (faces.length > 0) {
-        // Try to match detected face
-        const capture = await captureEmbeddingFromVideoAsync(videoRef.current);
-        const bestMatch = findBestMatch(capture.embedding);
-        
-        // Show name if distance is reasonable (within 1.5x threshold)
-        const showName = bestMatch && bestMatch.distance <= FACE_MATCH_THRESHOLD * 1.5;
-        
-        setDetectedFaces(faces.map((boundingBox) => ({
-          boundingBox,
-          confidence: capture.confidence ?? (capture.faceDetected ? 0.9 : 0.5),
-          employeeName: showName ? bestMatch.employee.fullName : undefined,
-          matchScore: bestMatch?.similarity,
-        })));
-      } else {
-        setDetectedFaces([]);
+  useEffect(() => {
+    const loadEmployees = async () => {
+      setIsLoadingEmployees(true);
+      setPhase("loading-employees");
+      setError(null);
+      try {
+        const data = await repository.listEmployees();
+        setEmployees(data);
+        setPhase("idle");
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "ไม่สามารถโหลดข้อมูลพนักงานได้");
+        setPhase("error");
+      } finally {
+        setIsLoadingEmployees(false);
       }
-    } catch {
-      // Silently continue
-    }
-  }, [findBestMatch]);
+    };
 
-  // Auto-detect and verify against all employees
-  const autoDetectAndVerify = useCallback(async (): Promise<boolean> => {
-    try {
-      if (!videoRef.current) {
-        return false; // Silently fail during detection loop
-      }
+    loadEmployees();
+  }, [repository]);
 
-      const capture = await captureEmbeddingFromVideoAsync(videoRef.current);
-      
-      // Skip if no face detected
-      if (!capture.faceDetected || capture.embedding.length === 0) {
-        setDetectedFaces([]);
-        return false;
-      }
+  // Auto-start camera and detection when everything is ready
+  useEffect(() => {
+    if (!autoStart || initStartedRef.current) return;
+    if (!modelsReady || isLoadingEmployees) return;
+    if (phase !== "idle") return;
 
-      const bestMatch = findBestMatch(capture.embedding);
-
-      // Update face overlay with current match info
-      if (capture.boundingBox) {
-        const showName = bestMatch && bestMatch.distance <= FACE_MATCH_THRESHOLD * 1.5;
-        setDetectedFaces([{
-          boundingBox: capture.boundingBox,
-          confidence: capture.confidence ?? 0.9,
-          employeeName: showName ? bestMatch.employee.fullName : undefined,
-          matchScore: bestMatch?.similarity,
-        }]);
-      }
-
-      if (!bestMatch) {
-        // No enrolled employees, continue scanning
-        return false;
-      }
-
-      // Check if distance is below threshold (match found)
-      if (bestMatch.distance <= FACE_MATCH_THRESHOLD) {
-        // Found a match! Stop detection and show result
-        stopDetection();
-        
-        latestEmbeddingRef.current = capture.embedding;
-        setSnapshot(capture.dataUrl);
-        setDetectedEmployee(bestMatch.employee);
-        setPhase("verifying");
-
-        const isMatch = true;
-        const newResult: FaceMatchResult = {
-          employeeId: bestMatch.employee.id,
-          capturedAt: new Date().toISOString(),
-          snapshotDataUrl: capture.dataUrl,
-          score: Number(bestMatch.similarity.toFixed(4)),
-          threshold: FACE_MATCH_THRESHOLD,
-          status: "matched",
-          message: `ตรวจพบ ${bestMatch.employee.fullName}`,
-        };
-
-        setMatchResult(newResult);
-        setPhase("matched");
-
-        return isMatch;
-      }
-
-      // No match within threshold, continue scanning
-      return false;
-    } catch {
-      // Silently continue on errors during detection
-      return false;
-    }
-  }, [findBestMatch, stopDetection]);
-
-  // Start continuous face detection
-  const startDetection = useCallback(() => {
-    if (!streamRef.current || !videoRef.current) {
-      setError("กรุณาเริ่มกล้องก่อนตรวจจับใบหน้า");
-      return;
-    }
-
-    // Check if any employees have embeddings
     const enrolledCount = employees.filter((emp) => emp.embedding?.vector?.length).length;
-    if (enrolledCount === 0) {
-      setError("ไม่มีพนักงานที่ลงทะเบียนใบหน้าไว้ กรุณาลงทะเบียนก่อน");
-      return;
-    }
+    
+    const autoInitialize = async () => {
+      initStartedRef.current = true;
+      const cameraStarted = await initializeCamera();
+      if (cameraStarted && enrolledCount > 0) {
+        // Small delay to ensure video is playing
+        setTimeout(() => {
+          startDetection();
+        }, 500);
+      }
+    };
 
-    setError(null);
-    setIsDetecting(true);
-    setPhase("detecting");
-    setDetectedEmployee(null);
-    setMatchResult(null);
+    autoInitialize();
+  }, [autoStart, modelsReady, isLoadingEmployees, phase, employees, initializeCamera, startDetection]);
 
-    // Start face overlay updates (faster interval)
-    faceOverlayIntervalRef.current = setInterval(() => {
-      void updateFaceOverlay();
-    }, FACE_OVERLAY_INTERVAL_MS);
-
-    // Start detection loop
-    detectionIntervalRef.current = setInterval(() => {
-      void autoDetectAndVerify();
-    }, DETECTION_INTERVAL_MS);
-
-    // Run first detection immediately
-    void autoDetectAndVerify();
-  }, [employees, autoDetectAndVerify, updateFaceOverlay]);
-
-  // Confirm check-in for detected employee
-  const confirmCheckIn = useCallback(async () => {
-    if (!detectedEmployee || !matchResult) {
-      setError("ไม่พบข้อมูลพนักงานที่ตรวจพบ");
-      return false;
-    }
-
-    try {
-      await repository.recordCheckIn(
-        buildEventPayload(
-          detectedEmployee.id,
-          matchResult.score,
-          true,
-          matchResult.snapshotDataUrl
-        ),
-      );
-
-      // Update the match result message to show success
-      setMatchResult((prev) =>
-        prev
-          ? {
-              ...prev,
-              message: `${detectedEmployee.fullName} เช็คชื่อสำเร็จ`,
-            }
-          : null
-      );
-
-      return true;
-    } catch (repoError) {
-      setError(
-        repoError instanceof Error ? repoError.message : "ไม่สามารถบันทึกการเช็คชื่อได้",
-      );
-      return false;
-    }
-  }, [detectedEmployee, matchResult, repository, buildEventPayload]);
-
-  // Enroll face for a specific employee (requires employee selection)
+  // Enroll face for a specific employee
   const enrollFromLastCapture = useCallback(async (employeeId: string) => {
     try {
       const employee = employees.find((item) => item.id === employeeId);
@@ -390,7 +470,7 @@ export const useFaceCheckViewModel = ({
       }
 
       const embedding: FaceEmbedding = {
-        version: "simple-v1",
+        version: "faceapi-v1",
         vector: latestEmbeddingRef.current,
         createdAt: new Date().toISOString(),
         source: "camera",
@@ -402,13 +482,13 @@ export const useFaceCheckViewModel = ({
       );
       return true;
     } catch (err) {
-      setError(err instanceof Error ? err.message : "ไม่สามารถลงทะเบียนข้อมูลใบหน้าเป็นฐานได้");
+      setError(err instanceof Error ? err.message : "ไม่สามารถลงทะเบียนข้อมูลใบหน้าได้");
       setPhase("error");
       return false;
     }
   }, [employees, repository, snapshot]);
 
-  // Capture a single frame for enrollment purposes
+  // Capture a single frame for enrollment
   const captureForEnrollment = useCallback(async () => {
     try {
       if (!videoRef.current) {
@@ -438,6 +518,9 @@ export const useFaceCheckViewModel = ({
 
   const resetSession = useCallback(() => {
     stopDetection();
+    if (cooldownTimeoutRef.current) {
+      clearTimeout(cooldownTimeoutRef.current);
+    }
     setMatchResult(null);
     setSnapshot(null);
     setDetectedEmployee(null);
@@ -445,59 +528,11 @@ export const useFaceCheckViewModel = ({
     setPhase(streamRef.current ? "camera-ready" : "idle");
     setError(null);
     setDetectedFaces([]);
+    setLivenessScore(0);
+    resetLivenessDetector();
   }, [stopDetection]);
 
-  // Add a test employee with current face (dev purpose)
-  const addTestEmployee = useCallback(async (name: string) => {
-    try {
-      if (!videoRef.current) {
-        throw new Error("กรุณาเริ่มกล้องก่อน");
-      }
-
-      setPhase("capturing");
-      setError(null);
-
-      const capture = await captureEmbeddingFromVideoAsync(videoRef.current);
-      
-      if (!capture.faceDetected || capture.embedding.length === 0) {
-        throw new Error("ไม่พบใบหน้าในภาพ กรุณาหันหน้าเข้าหากล้อง");
-      }
-      
-      const testEmployee: Employee = {
-        id: `test_${Date.now()}`,
-        fullName: name,
-        email: `${name.toLowerCase().replace(/\s+/g, '.')}@test.local`,
-        role: "Test Employee",
-        department: "Development",
-        avatarUrl: `https://api.dicebear.com/9.x/initials/svg?seed=${encodeURIComponent(name)}`,
-        lastCheckIn: undefined,
-        embedding: {
-          version: "faceapi-v1", // Updated version for face-api.js embeddings
-          vector: capture.embedding,
-          createdAt: new Date().toISOString(),
-          source: "camera",
-        },
-      };
-
-      // Add to repository
-      if (repository.addEmployee) {
-        await repository.addEmployee(testEmployee);
-      }
-      
-      // Update local state
-      setEmployees((prev) => [...prev, testEmployee]);
-      setSnapshot(capture.dataUrl);
-      setPhase("camera-ready");
-
-      return testEmployee;
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "ไม่สามารถเพิ่มพนักงานทดสอบได้");
-      setPhase("error");
-      return null;
-    }
-  }, [repository]);
-
-  // Get video dimensions for coordinate mapping
+  // Get video dimensions
   const getVideoDimensions = useCallback(() => {
     if (!videoRef.current) return { width: 640, height: 640 };
     return {
@@ -517,23 +552,23 @@ export const useFaceCheckViewModel = ({
         isCameraSupported,
         isDetecting,
         modelsReady,
+        livenessScore,
       },
       videoRef,
       matchResult,
       snapshot,
       error,
       detectedFaces,
+      checkInLogs,
       getVideoDimensions,
       actions: {
         initializeCamera,
         startDetection,
         stopDetection,
-        confirmCheckIn,
         captureForEnrollment,
         enrollFromLastCapture,
         stopCamera,
         resetSession,
-        addTestEmployee,
       },
     }),
     [
@@ -545,20 +580,20 @@ export const useFaceCheckViewModel = ({
       isCameraSupported,
       isDetecting,
       modelsReady,
+      livenessScore,
       matchResult,
       snapshot,
       error,
       detectedFaces,
+      checkInLogs,
       getVideoDimensions,
       initializeCamera,
       startDetection,
       stopDetection,
-      confirmCheckIn,
       captureForEnrollment,
       enrollFromLastCapture,
       stopCamera,
       resetSession,
-      addTestEmployee,
     ],
   );
 };

@@ -1,5 +1,5 @@
-import { FaceCheckContainer } from "@/features/face-check/containers/face-check-container";
+import { redirect } from "next/navigation";
 
 export default function Home() {
-  return <FaceCheckContainer />;
+  redirect("/kiosk");
 }
