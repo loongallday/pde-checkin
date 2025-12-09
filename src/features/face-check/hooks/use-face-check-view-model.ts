@@ -206,12 +206,27 @@ export const useFaceCheckViewModel = ({
     };
   }, [employees]);
 
-  // Check if employee is in cooldown
+  // Check if employee is in cooldown (checks both memory and database logs)
   const isInCooldown = useCallback((employeeId: string): boolean => {
-    const lastCheckIn = recentCheckIns.current.get(employeeId);
-    if (!lastCheckIn) return false;
-    return Date.now() - lastCheckIn < SAME_PERSON_COOLDOWN_MS;
-  }, []);
+    const now = Date.now();
+    
+    // Check in-memory cache first (for current session)
+    const lastMemoryCheckIn = recentCheckIns.current.get(employeeId);
+    if (lastMemoryCheckIn && now - lastMemoryCheckIn < SAME_PERSON_COOLDOWN_MS) {
+      return true;
+    }
+    
+    // Check database logs (persisted across refreshes)
+    const dbCheckIn = checkInLogs.find(log => log.employeeId === employeeId);
+    if (dbCheckIn) {
+      const dbCheckInTime = dbCheckIn.timestamp.getTime();
+      if (now - dbCheckInTime < SAME_PERSON_COOLDOWN_MS) {
+        return true;
+      }
+    }
+    
+    return false;
+  }, [checkInLogs]);
 
   // Add to check-in log
   const addCheckInLog = useCallback((employee: Employee, similarity: number, snapshotUrl?: string) => {
