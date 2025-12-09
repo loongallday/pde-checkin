@@ -3,13 +3,13 @@ import type { Employee, FaceCheckEventPayload, FaceEmbedding, FaceEmbeddings, Fa
 import { PROGRESSIVE_LEARNING_CONFIG } from "@/entities/employee";
 import { mockEmployees } from "@/shared/mocks/employees";
 import { getSupabaseClient, hasSupabaseConfig } from "@/shared/services/supabase-client";
-import { aggregateEmbedding } from "@/shared/lib/face-embedding";
 
 const embeddingEntrySchema = z.object({
   vector: z.array(z.number()),
   angle: z.enum(["front", "left", "right", "slight-left", "slight-right"]),
   createdAt: z.string(),
   quality: z.number().optional(),
+  imageDataUrl: z.string().optional(), // Base64 face image
 });
 
 const embeddingsSchema = z.object({

@@ -124,6 +124,11 @@ export default function HistoryPage() {
             <p className="text-sm text-slate-400">{formatDate(selectedDate)}</p>
           </div>
           <div className="flex items-center gap-3">
+            <Link href="/employees">
+              <Button variant="outline" size="sm">
+                👥 พนักงาน
+              </Button>
+            </Link>
             <Link href="/admin">
               <Button variant="outline" size="sm">
                 ⚙️ ตั้งค่า

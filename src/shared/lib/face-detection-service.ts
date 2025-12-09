@@ -77,14 +77,14 @@ export const getModelLoadError = (): string | null => modelLoadError;
 
 // Detection confidence thresholds
 export const DETECTION_CONFIG = {
-  // Minimum confidence for face detection (increased from 0.5 to 0.7 to reduce false accepts)
-  MIN_CONFIDENCE: 0.7,
-  // Fast detector threshold (slightly lower for responsiveness)
-  FAST_DETECTOR_THRESHOLD: 0.6,
+  // Minimum confidence for face detection
+  MIN_CONFIDENCE: 0.6,
+  // SSD MobileNet threshold (lower = detects farther/moving faces)
+  SSD_MIN_CONFIDENCE: 0.5,
 };
 
 /**
- * Detect faces in a video element using SSD MobileNet (more accurate)
+ * Detect faces using SSD MobileNet (MORE ACCURATE) with descriptors
  */
 export const detectFaces = async (
   video: HTMLVideoElement
@@ -95,23 +95,28 @@ export const detectFaces = async (
   }
 
   try {
-    // Use SSD MobileNet with landmarks and descriptors
+    // Use SSD MobileNet - more accurate, fewer false positives
     const detections = await faceapi
-      .detectAllFaces(video, new faceapi.SsdMobilenetv1Options({ minConfidence: DETECTION_CONFIG.MIN_CONFIDENCE }))
+      .detectAllFaces(video, new faceapi.SsdMobilenetv1Options({ 
+        minConfidence: DETECTION_CONFIG.SSD_MIN_CONFIDENCE 
+      }))
       .withFaceLandmarks()
       .withFaceDescriptors();
 
-    return detections.map((detection) => ({
-      box: {
-        x: detection.detection.box.x,
-        y: detection.detection.box.y,
-        width: detection.detection.box.width,
-        height: detection.detection.box.height,
-      },
-      score: detection.detection.score,
-      landmarks: detection.landmarks,
-      descriptor: detection.descriptor,
-    }));
+    // Filter out very small faces (likely false positives)
+    return detections
+      .filter(d => d.detection.box.width >= 30 && d.detection.box.height >= 30)
+      .map((detection) => ({
+        box: {
+          x: detection.detection.box.x,
+          y: detection.detection.box.y,
+          width: detection.detection.box.width,
+          height: detection.detection.box.height,
+        },
+        score: detection.detection.score,
+        landmarks: detection.landmarks,
+        descriptor: detection.descriptor,
+      }));
   } catch (error) {
     console.error("Face detection error:", error);
     return [];
@@ -132,7 +137,7 @@ export const detectFacesFast = async (
   try {
     const detections = await faceapi.detectAllFaces(
       video,
-      new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: DETECTION_CONFIG.FAST_DETECTOR_THRESHOLD })
+      new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.5 })
     );
 
     return detections.map((detection) => ({

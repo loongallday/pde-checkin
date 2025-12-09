@@ -1,18 +1,14 @@
+"use client";
+
 import {
-  detectFacesWithMediaPipe,
-  detectSingleFaceWithMediaPipe,
-  loadMediaPipeModels,
-  areMediaPipeModelsLoaded,
-  estimateHeadPose,
-  type MediaPipeLandmark,
-  type DetectionResult,
-} from "./mediapipe-face-detection";
-import {
-  loadFaceRecognitionModel,
-  isFaceRecognitionModelLoaded,
-  generateEmbeddingFromLandmarks,
-  compareEmbeddings,
-} from "./tensorflow-face-recognition";
+  loadFaceDetectionModels,
+  areModelsLoaded,
+  detectSingleFaceWithDescriptor,
+  detectFaces,
+  compareFaceDescriptors,
+  descriptorToArray,
+  DETECTION_CONFIG,
+} from "./face-detection-service";
 import type { FaceAngle, FaceEmbeddings, FaceEmbeddingEntry } from "@/entities/employee";
 
 export interface FaceBoundingBox {
@@ -22,37 +18,12 @@ export interface FaceBoundingBox {
   height: number;
 }
 
-// Quality validation result
-export interface FaceQualityResult {
-  isValid: boolean;
-  score: number; // 0-1 overall quality score
-  issues: string[];
-  details: {
-    faceSize: { width: number; height: number; valid: boolean };
-    confidence: { value: number; valid: boolean };
-    brightness: { value: number; valid: boolean };
-    faceAngle: { pitch: number; yaw: number; roll: number; valid: boolean };
-  };
-}
-
-// Quality thresholds
-export const QUALITY_THRESHOLDS = {
-  MIN_FACE_SIZE: 100, // Minimum 100x100 pixels
-  MIN_CONFIDENCE: 0.7, // Minimum detection confidence
-  MIN_BRIGHTNESS: 0.2, // Minimum brightness (0-1)
-  MAX_BRIGHTNESS: 0.9, // Maximum brightness (0-1)
-  MAX_FACE_ANGLE: 30, // Maximum degrees from frontal (more lenient for enrollment)
-};
-
 export interface FrameCaptureResult {
   dataUrl: string;
   embedding: number[];
   faceDetected: boolean;
   boundingBox?: FaceBoundingBox;
   confidence?: number;
-  landmarks?: MediaPipeLandmark[]; // MediaPipe 3D landmarks
-  quality?: FaceQualityResult; // Quality assessment
-  estimatedAngle?: FaceAngle; // Estimated face angle
 }
 
 // Face detection result for UI overlay
@@ -60,27 +31,23 @@ export interface DetectedFace {
   boundingBox: FaceBoundingBox;
   confidence: number;
   employeeName?: string;
+  employeeId?: string;
   matchScore?: number;
+  distance?: number;
 }
 
 // Face match threshold for euclidean distance (lower = stricter)
-// 0.5 is a good balance between security and usability
-// Progressive learning will improve accuracy over time
-export const FACE_MATCH_THRESHOLD = 0.5;
+// 0.35 is VERY strict - only matches if faces are very similar
+export const FACE_MATCH_THRESHOLD = 0.35;
 
-// Legacy threshold for cosine similarity (kept for compatibility)
-export const FACE_MATCH_THRESHOLD_COSINE = 0.82;
-
-// Accuracy improvement constants
+// Accuracy config - HIGH SECURITY
 export const ACCURACY_CONFIG = {
-  // Minimum gap between best and second-best match to accept
-  MIN_CONFIDENCE_GAP: 0.12, // Slightly more lenient
-  // Number of consecutive matches required to same person
-  CONSECUTIVE_MATCHES_REQUIRED: 1, // Instant check-in after liveness passes
-  // Minimum quality score for check-in (not just enrollment)
-  MIN_QUALITY_FOR_CHECKIN: 0.6, // More lenient for speed
-  // Minimum detection confidence for check-in
-  MIN_DETECTION_CONFIDENCE: 0.6, // More lenient for speed
+  // Gap between best match and 2nd best (higher = more certain it's the right person)
+  MIN_CONFIDENCE_GAP: 0.15,
+  // Require multiple frames of same person before check-in (prevents false positives)
+  CONSECUTIVE_MATCHES_REQUIRED: 3,
+  // Minimum detection confidence
+  MIN_DETECTION_CONFIDENCE: 0.6,
 };
 
 const assertBrowser = () => {
@@ -102,87 +69,55 @@ const createWorkingCanvas = (width: number, height: number) => {
 };
 
 /**
- * Initialize face detection models (MediaPipe + TensorFlow.js)
- * Call this early in app lifecycle for faster first detection
+ * Initialize face detection models (face-api.js only)
  */
 export const initializeFaceDetection = async (): Promise<boolean> => {
-  // Load MediaPipe (for detection/liveness) and TensorFlow.js (for embeddings)
-  const [mediaPipeLoaded, tfLoaded] = await Promise.all([
-    loadMediaPipeModels(),
-    loadFaceRecognitionModel(),
-  ]);
-  return mediaPipeLoaded && tfLoaded;
+  return loadFaceDetectionModels();
 };
 
 /**
  * Check if face detection is ready
  */
 export const isFaceDetectionReady = (): boolean => {
-  return areMediaPipeModelsLoaded() && isFaceRecognitionModelLoaded();
+  return areModelsLoaded();
 };
 
 /**
- * Capture frame and detect face with AI-powered detection
+ * Simple capture - just take a photo and detect face
  */
 export const captureEmbeddingFromVideoAsync = async (
   video: HTMLVideoElement,
-  options?: { jpegQuality?: number; validateQuality?: boolean }
+  options?: { jpegQuality?: number }
 ): Promise<FrameCaptureResult> => {
   if (!video) {
     throw new Error("สตรีมกล้องยังไม่พร้อม");
   }
 
   const jpegQuality = options?.jpegQuality ?? 0.85;
-  const validateQuality = options?.validateQuality ?? false;
   const width = video.videoWidth || 640;
   const height = video.videoHeight || 640;
 
-  // Create canvas for snapshot
-  // Flip horizontally to match what user sees (camera is mirrored)
+  // Create canvas for snapshot (flipped to match user view)
   const { canvas, context } = createWorkingCanvas(width, height);
   context.save();
-  context.scale(-1, 1); // Flip horizontally
+  context.scale(-1, 1);
   context.drawImage(video, -width, 0, width, height);
   context.restore();
   const dataUrl = canvas.toDataURL("image/jpeg", jpegQuality);
 
-  // Detect face using MediaPipe
-  console.log("[FaceEmbedding] Starting MediaPipe detection...");
-  const detectionStartTime = performance.now();
-  const detection = await detectSingleFaceWithMediaPipe(video);
-  const detectionDuration = performance.now() - detectionStartTime;
-  console.log("[FaceEmbedding] MediaPipe detection completed", {
-    duration: `${detectionDuration.toFixed(2)}ms`,
-    detected: !!detection,
-    landmarksCount: detection?.landmarks?.length || 0,
-  });
+  // Detect face using face-api.js
+  const detection = await detectSingleFaceWithDescriptor(video);
 
-  if (detection && detection.landmarks && detection.landmarks.length >= 468) {
-    // Generate embedding from MediaPipe landmarks using TensorFlow.js
-    const embedding = await generateEmbeddingFromLandmarks(detection.landmarks);
-    
-    // Validate quality if requested
-    const quality = validateQuality 
-      ? validateFaceQualityFromMediaPipe(detection, context, width, height)
-      : undefined;
-    
-    // Estimate face angle from MediaPipe landmarks
-    const headPose = estimateHeadPose(detection.landmarks);
-    const estimatedAngle = estimateFaceAngleCategoryFromPose(headPose);
-    
+  if (detection && detection.descriptor) {
     return {
       dataUrl,
-      embedding,
+      embedding: descriptorToArray(detection.descriptor),
       faceDetected: true,
       boundingBox: detection.box,
       confidence: detection.score,
-      landmarks: detection.landmarks,
-      quality,
-      estimatedAngle,
     };
   }
 
-  // No face detected - return empty embedding
   return {
     dataUrl,
     embedding: [],
@@ -191,58 +126,26 @@ export const captureEmbeddingFromVideoAsync = async (
 };
 
 /**
- * Synchronous capture (fallback, uses last async result or empty)
+ * Detect multiple faces in video (for kiosk)
  */
-export const captureEmbeddingFromVideo = (
-  video: HTMLVideoElement,
-  options?: { jpegQuality?: number }
-): FrameCaptureResult => {
-  if (!video) {
-    throw new Error("สตรีมกล้องยังไม่พร้อม");
-  }
-
-  const jpegQuality = options?.jpegQuality ?? 0.85;
-  const width = video.videoWidth || 640;
-  const height = video.videoHeight || 640;
-
-  const { canvas, context } = createWorkingCanvas(width, height);
-  context.drawImage(video, 0, 0, width, height);
-  const dataUrl = canvas.toDataURL("image/jpeg", jpegQuality);
-
-  // Synchronous version cannot do AI detection
-  // Return empty embedding - caller should use async version
-  return {
-    dataUrl,
-    embedding: [],
-    faceDetected: false,
-  };
-};
-
-/**
- * Detect faces in video frame for overlay display (fast detection)
- */
-export const detectFacesInVideo = async (
+export const detectMultipleFaces = async (
   video: HTMLVideoElement
-): Promise<FaceBoundingBox[]> => {
+): Promise<Array<{ box: FaceBoundingBox; score: number; embedding: number[] }>> => {
   if (!video || video.readyState < 2) return [];
 
-  const detections = await detectFacesWithMediaPipe(video);
-  return detections.map((d) => d.box);
+  const detections = await detectFaces(video);
+  
+  return detections
+    .filter(d => d.descriptor && d.score >= DETECTION_CONFIG.MIN_CONFIDENCE)
+    .map(d => ({
+      box: d.box,
+      score: d.score,
+      embedding: d.descriptor ? descriptorToArray(d.descriptor) : [],
+    }));
 };
 
 /**
- * Detect faces with full detection results
- */
-export const detectFacesWithDetails = async (
-  video: HTMLVideoElement
-): Promise<DetectionResult[]> => {
-  if (!video || video.readyState < 2) return [];
-  return detectFacesWithMediaPipe(video);
-};
-
-/**
- * Compare two face embeddings using euclidean distance
- * Lower distance = more similar
+ * Compare two face embeddings
  */
 export const compareFaces = (
   embedding1: number[] | Float32Array,
@@ -250,7 +153,10 @@ export const compareFaces = (
 ): number => {
   if (embedding1.length === 0 || embedding2.length === 0) return Infinity;
   
-  return compareEmbeddings(embedding1, embedding2);
+  const e1 = embedding1 instanceof Float32Array ? embedding1 : new Float32Array(embedding1);
+  const e2 = embedding2 instanceof Float32Array ? embedding2 : new Float32Array(embedding2);
+  
+  return compareFaceDescriptors(e1, e2);
 };
 
 /**
@@ -261,165 +167,14 @@ export const facesMatch = (
   embedding2: number[] | Float32Array,
   threshold: number = FACE_MATCH_THRESHOLD
 ): boolean => {
-  const distance = compareFaces(embedding1, embedding2);
-  return distance <= threshold;
+  return compareFaces(embedding1, embedding2) <= threshold;
 };
 
 /**
- * Convert distance to similarity score (0-1, higher = more similar)
+ * Convert distance to similarity score (0-1)
  */
 export const distanceToSimilarity = (distance: number): number => {
-  // Map euclidean distance to similarity score
-  // Distance 0 = similarity 1, Distance >= 1.5 = similarity 0
   return Math.max(0, Math.min(1, 1 - distance / 1.5));
-};
-
-/**
- * Convert similarity score to distance
- */
-export const similarityToDistance = (similarity: number): number => {
-  return (1 - similarity) * 1.5;
-};
-
-/**
- * Estimate face angle from MediaPipe landmarks
- * Returns pitch, yaw, roll in degrees
- */
-export const estimateFaceAngle = (
-  landmarks: MediaPipeLandmark[]
-): { pitch: number; yaw: number; roll: number } => {
-  return estimateHeadPose(landmarks);
-};
-
-/**
- * Estimate which angle category a face is at from head pose
- */
-export const estimateFaceAngleCategoryFromPose = (
-  pose: { pitch: number; yaw: number; roll: number }
-): FaceAngle => {
-  const { yaw } = pose;
-  
-  if (Math.abs(yaw) < 10) return "front";
-  if (yaw < -25) return "left";
-  if (yaw > 25) return "right";
-  if (yaw < -10) return "slight-left";
-  return "slight-right";
-};
-
-/**
- * Calculate image brightness from canvas
- */
-const calculateBrightness = (context: CanvasRenderingContext2D, width: number, height: number): number => {
-  const imageData = context.getImageData(0, 0, width, height);
-  const data = imageData.data;
-  let totalBrightness = 0;
-  const pixelCount = width * height;
-  
-  for (let i = 0; i < data.length; i += 4) {
-    // Calculate perceived brightness using luminosity formula
-    const brightness = (0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]) / 255;
-    totalBrightness += brightness;
-  }
-  
-  return totalBrightness / pixelCount;
-};
-
-/**
- * Validate face quality for enrollment (MediaPipe version)
- */
-export const validateFaceQualityFromMediaPipe = (
-  detection: DetectionResult,
-  context?: CanvasRenderingContext2D,
-  width?: number,
-  height?: number
-): FaceQualityResult => {
-  const issues: string[] = [];
-  let score = 1.0;
-  
-  // Check face size
-  const faceWidth = detection.box.width;
-  const faceHeight = detection.box.height;
-  const faceSizeValid = faceWidth >= QUALITY_THRESHOLDS.MIN_FACE_SIZE && 
-                        faceHeight >= QUALITY_THRESHOLDS.MIN_FACE_SIZE;
-  if (!faceSizeValid) {
-    issues.push(`ใบหน้าเล็กเกินไป (${Math.round(faceWidth)}x${Math.round(faceHeight)}px)`);
-    score -= 0.3;
-  }
-  
-  // Check detection confidence
-  const confidenceValid = detection.score >= QUALITY_THRESHOLDS.MIN_CONFIDENCE;
-  if (!confidenceValid) {
-    issues.push(`ความมั่นใจในการตรวจจับต่ำ (${Math.round(detection.score * 100)}%)`);
-    score -= 0.2;
-  }
-  
-  // Check brightness if context available
-  let brightnessValue = 0.5; // Default to neutral
-  let brightnessValid = true;
-  if (context && width && height) {
-    brightnessValue = calculateBrightness(context, width, height);
-    brightnessValid = brightnessValue >= QUALITY_THRESHOLDS.MIN_BRIGHTNESS && 
-                      brightnessValue <= QUALITY_THRESHOLDS.MAX_BRIGHTNESS;
-    if (!brightnessValid) {
-      if (brightnessValue < QUALITY_THRESHOLDS.MIN_BRIGHTNESS) {
-        issues.push("ภาพมืดเกินไป");
-      } else {
-        issues.push("ภาพสว่างเกินไป");
-      }
-      score -= 0.2;
-    }
-  }
-  
-  // Check face angle if landmarks available
-  // Note: pitch is 90° when straight, >90° = up, <90° = down
-  let angleDetails = { pitch: 0, yaw: 0, roll: 0, valid: true };
-  if (detection.landmarks) {
-    const angles = estimateFaceAngle(detection.landmarks);
-    // Check deviation from ideal angles: yaw=0, pitch=90, roll=0
-    const pitchDeviation = Math.abs(angles.pitch - 90);
-    angleDetails = {
-      ...angles,
-      valid: Math.abs(angles.yaw) <= QUALITY_THRESHOLDS.MAX_FACE_ANGLE &&
-             pitchDeviation <= QUALITY_THRESHOLDS.MAX_FACE_ANGLE &&
-             Math.abs(angles.roll) <= 30,
-    };
-    if (!angleDetails.valid) {
-      // Provide specific guidance based on which angle is off
-      const angleIssues: string[] = [];
-      if (Math.abs(angleDetails.yaw) > QUALITY_THRESHOLDS.MAX_FACE_ANGLE) {
-        if (angleDetails.yaw > 0) {
-          angleIssues.push("หันหน้าไปทางขวาเกินไป - กรุณาหันหน้าไปทางซ้ายเล็กน้อย");
-        } else {
-          angleIssues.push("หันหน้าไปทางซ้ายเกินไป - กรุณาหันหน้าไปทางขวาเล็กน้อย");
-        }
-      }
-      if (pitchDeviation > QUALITY_THRESHOLDS.MAX_FACE_ANGLE) {
-        // pitch > 90 = looking up, pitch < 90 = looking down
-        if (angleDetails.pitch > 90) {
-          angleIssues.push("เงยหน้าขึ้นเกินไป - กรุณาก้มหน้าลงเล็กน้อย");
-        } else {
-          angleIssues.push("ก้มหน้าลงเกินไป - กรุณาเงยหน้าขึ้นเล็กน้อย");
-        }
-      }
-      if (Math.abs(angleDetails.roll) > 30) {
-        angleIssues.push("เอียงหัวไปข้างหนึ่ง - กรุณาตั้งหัวให้ตรง");
-      }
-      issues.push(...(angleIssues.length > 0 ? angleIssues : ["มุมใบหน้าเอียงมากเกินไป - กรุณาหันหน้าเข้าหากล้องตรงๆ"]));
-      score -= 0.2;
-    }
-  }
-  
-  return {
-    isValid: issues.length === 0,
-    score: Math.max(0, score),
-    issues,
-    details: {
-      faceSize: { width: faceWidth, height: faceHeight, valid: faceSizeValid },
-      confidence: { value: detection.score, valid: confidenceValid },
-      brightness: { value: brightnessValue, valid: brightnessValid },
-      faceAngle: angleDetails,
-    },
-  };
 };
 
 /**
@@ -442,33 +197,21 @@ export const computeAverageEmbedding = (embeddings: number[][]): number[] => {
     average[i] /= embeddings.length;
   }
   
-  // Normalize the averaged vector
-  const magnitude = Math.sqrt(average.reduce((sum, val) => sum + val * val, 0));
-  if (magnitude > 0) {
-    for (let i = 0; i < dimension; i++) {
-      average[i] /= magnitude;
-    }
-  }
-  
   return average;
 };
 
 /**
- * Create a FaceEmbeddings object from multiple captures
+ * Create FaceEmbeddings from entries
  */
 export const createFaceEmbeddings = (
   entries: FaceEmbeddingEntry[],
   computeAverage = true
 ): FaceEmbeddings => {
   const now = new Date().toISOString();
-  const averageVector = computeAverage 
-    ? computeAverageEmbedding(entries.map(e => e.vector))
-    : undefined;
-  
   return {
     version: "faceapi-v1",
     entries,
-    averageVector,
+    averageVector: computeAverage ? computeAverageEmbedding(entries.map(e => e.vector)) : undefined,
     createdAt: now,
     updatedAt: now,
     source: "camera",
@@ -476,149 +219,7 @@ export const createFaceEmbeddings = (
 };
 
 /**
- * Progressive learning: add or replace embedding in existing embeddings
- * - Adds new embedding if under MAX_EMBEDDINGS
- * - Replaces lowest quality embedding if at capacity and new is better
- * - Maintains diversity by checking angle distribution
- */
-export const aggregateEmbedding = (
-  existingEmbeddings: FaceEmbeddings | undefined,
-  newEntry: FaceEmbeddingEntry,
-  config: {
-    maxEmbeddings: number;
-    replaceThreshold: number;
-  }
-): FaceEmbeddings => {
-  const now = new Date().toISOString();
-  
-  // If no existing embeddings, create new
-  if (!existingEmbeddings || !existingEmbeddings.entries.length) {
-    return {
-      version: "faceapi-v1",
-      entries: [newEntry],
-      averageVector: newEntry.vector,
-      createdAt: now,
-      updatedAt: now,
-      source: "camera",
-    };
-  }
-
-  const entries = [...existingEmbeddings.entries];
-  const newQuality = newEntry.quality ?? 0.5;
-
-  // Check if we have room for more entries
-  if (entries.length < config.maxEmbeddings) {
-    // Simply add the new entry
-    entries.push(newEntry);
-  } else {
-    // At capacity - find lowest quality entry to potentially replace
-    let lowestIndex = 0;
-    let lowestQuality = entries[0].quality ?? 0.5;
-
-    for (let i = 1; i < entries.length; i++) {
-      const quality = entries[i].quality ?? 0.5;
-      if (quality < lowestQuality) {
-        lowestQuality = quality;
-        lowestIndex = i;
-      }
-    }
-
-    // Replace only if new embedding is significantly better
-    if (newQuality > lowestQuality + config.replaceThreshold) {
-      entries[lowestIndex] = newEntry;
-    } else {
-      // Check if we need more diversity (different angle)
-      const angleCount = new Map<string, number>();
-      for (const entry of entries) {
-        angleCount.set(entry.angle, (angleCount.get(entry.angle) || 0) + 1);
-      }
-      
-      const newAngleCount = angleCount.get(newEntry.angle) || 0;
-      const avgPerAngle = entries.length / angleCount.size;
-      
-      // If this angle is underrepresented, consider replacing an overrepresented angle
-      if (newAngleCount < avgPerAngle * 0.5) {
-        // Find an overrepresented angle with low quality
-        let replaceIndex = -1;
-        let replaceScore = Infinity;
-        
-        for (let i = 0; i < entries.length; i++) {
-          const entry = entries[i];
-          const count = angleCount.get(entry.angle) || 0;
-          // Prioritize replacing overrepresented angles with low quality
-          if (count > avgPerAngle) {
-            const quality = entry.quality ?? 0.5;
-            if (quality < replaceScore) {
-              replaceScore = quality;
-              replaceIndex = i;
-            }
-          }
-        }
-        
-        if (replaceIndex >= 0 && newQuality > replaceScore) {
-          entries[replaceIndex] = newEntry;
-        }
-      }
-      // If conditions not met, don't add (keep existing quality embeddings)
-    }
-  }
-
-  // Recompute average vector
-  const averageVector = computeAverageEmbedding(entries.map(e => e.vector));
-
-  return {
-    ...existingEmbeddings,
-    entries,
-    averageVector,
-    updatedAt: now,
-  };
-};
-
-/**
- * Get statistics about the embeddings collection
- */
-export const getEmbeddingsStats = (embeddings: FaceEmbeddings | undefined): {
-  count: number;
-  avgQuality: number;
-  angleDistribution: Record<string, number>;
-  oldestEntry: string | null;
-  newestEntry: string | null;
-} => {
-  if (!embeddings || !embeddings.entries.length) {
-    return {
-      count: 0,
-      avgQuality: 0,
-      angleDistribution: {},
-      oldestEntry: null,
-      newestEntry: null,
-    };
-  }
-
-  const entries = embeddings.entries;
-  const totalQuality = entries.reduce((sum, e) => sum + (e.quality ?? 0.5), 0);
-  const avgQuality = totalQuality / entries.length;
-
-  const angleDistribution: Record<string, number> = {};
-  for (const entry of entries) {
-    angleDistribution[entry.angle] = (angleDistribution[entry.angle] || 0) + 1;
-  }
-
-  const sortedByDate = [...entries].sort(
-    (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
-  );
-
-  return {
-    count: entries.length,
-    avgQuality,
-    angleDistribution,
-    oldestEntry: sortedByDate[0]?.createdAt ?? null,
-    newestEntry: sortedByDate[sortedByDate.length - 1]?.createdAt ?? null,
-  };
-};
-
-/**
- * Find best match from multiple embeddings per employee (best-of-N approach)
- * Returns the minimum distance across all embeddings for each employee
+ * Find best match for a single face
  */
 export const findBestMatchMultiEmbedding = (
   queryEmbedding: number[],
@@ -626,7 +227,7 @@ export const findBestMatchMultiEmbedding = (
     id: string;
     name: string;
     embeddings?: FaceEmbeddings;
-    embedding?: { vector: number[] }; // Legacy single embedding
+    embedding?: { vector: number[] };
   }>
 ): { employeeId: string; employeeName: string; distance: number } | null => {
   if (queryEmbedding.length === 0) return null;
@@ -636,26 +237,16 @@ export const findBestMatchMultiEmbedding = (
   for (const employee of employees) {
     let minDistance = Infinity;
     
-    // Check multi-embeddings first (preferred)
     if (employee.embeddings?.entries?.length) {
       for (const entry of employee.embeddings.entries) {
         const distance = compareFaces(queryEmbedding, entry.vector);
-        if (distance < minDistance) {
-          minDistance = distance;
-        }
+        if (distance < minDistance) minDistance = distance;
       }
-      
-      // Also check against average if available
       if (employee.embeddings.averageVector?.length) {
         const avgDistance = compareFaces(queryEmbedding, employee.embeddings.averageVector);
-        // Use average only if it's better (shouldn't usually be, but as fallback)
-        if (avgDistance < minDistance) {
-          minDistance = avgDistance;
-        }
+        if (avgDistance < minDistance) minDistance = avgDistance;
       }
-    }
-    // Fall back to legacy single embedding
-    else if (employee.embedding?.vector?.length) {
+    } else if (employee.embedding?.vector?.length) {
       minDistance = compareFaces(queryEmbedding, employee.embedding.vector);
     }
     
@@ -672,8 +263,7 @@ export const findBestMatchMultiEmbedding = (
 };
 
 /**
- * Find best match with confidence gap validation
- * Returns best match only if it's significantly better than second-best
+ * Find best match with confidence gap
  */
 export const findBestMatchWithConfidenceGap = (
   queryEmbedding: number[],
@@ -683,10 +273,7 @@ export const findBestMatchWithConfidenceGap = (
     embeddings?: FaceEmbeddings;
     embedding?: { vector: number[] };
   }>,
-  options?: {
-    threshold?: number;
-    minGap?: number;
-  }
+  options?: { threshold?: number; minGap?: number }
 ): { 
   bestMatch: { employeeId: string; employeeName: string; distance: number } | null;
   secondBestDistance: number;
@@ -699,7 +286,6 @@ export const findBestMatchWithConfidenceGap = (
     return { bestMatch: null, secondBestDistance: Infinity, hasConfidenceGap: false };
   }
   
-  // Calculate distances for all employees
   const matches: Array<{ employeeId: string; employeeName: string; distance: number }> = [];
   
   for (const employee of employees) {
@@ -708,36 +294,25 @@ export const findBestMatchWithConfidenceGap = (
     if (employee.embeddings?.entries?.length) {
       for (const entry of employee.embeddings.entries) {
         const distance = compareFaces(queryEmbedding, entry.vector);
-        if (distance < minDistance) {
-          minDistance = distance;
-        }
+        if (distance < minDistance) minDistance = distance;
       }
       if (employee.embeddings.averageVector?.length) {
         const avgDistance = compareFaces(queryEmbedding, employee.embeddings.averageVector);
-        if (avgDistance < minDistance) {
-          minDistance = avgDistance;
-        }
+        if (avgDistance < minDistance) minDistance = avgDistance;
       }
     } else if (employee.embedding?.vector?.length) {
       minDistance = compareFaces(queryEmbedding, employee.embedding.vector);
     }
     
     if (minDistance < Infinity) {
-      matches.push({
-        employeeId: employee.id,
-        employeeName: employee.name,
-        distance: minDistance,
-      });
+      matches.push({ employeeId: employee.id, employeeName: employee.name, distance: minDistance });
     }
   }
   
-  // Sort by distance (ascending)
   matches.sort((a, b) => a.distance - b.distance);
   
   const bestMatch = matches[0] ?? null;
   const secondBestDistance = matches[1]?.distance ?? Infinity;
-  
-  // Check if best match passes threshold and has sufficient gap from second-best
   const passesThreshold = bestMatch && bestMatch.distance <= threshold;
   const hasConfidenceGap = secondBestDistance - (bestMatch?.distance ?? 0) >= minGap;
   
@@ -749,69 +324,33 @@ export const findBestMatchWithConfidenceGap = (
 };
 
 /**
- * Align and normalize face for better embedding consistency
- * Uses affine transformation based on eye positions (MediaPipe version)
+ * Match multiple faces against employees (for kiosk multi-person detection)
  */
-export const alignFace = async (
-  video: HTMLVideoElement,
-  landmarks: MediaPipeLandmark[],
-  targetSize = 224
-): Promise<HTMLCanvasElement> => {
-  if (landmarks.length < 468) {
-    throw new Error("Insufficient landmarks for face alignment");
-  }
-  
-  // Get eye centers from MediaPipe landmarks
-  // Left eye: landmarks[33] (outer), landmarks[133] (inner)
-  // Right eye: landmarks[362] (outer), landmarks[263] (inner)
-  const leftEyeCenter = {
-    x: (landmarks[33].x + landmarks[133].x) / 2,
-    y: (landmarks[33].y + landmarks[133].y) / 2,
-  };
-  const rightEyeCenter = {
-    x: (landmarks[362].x + landmarks[263].x) / 2,
-    y: (landmarks[362].y + landmarks[263].y) / 2,
-  };
-  
-  // Calculate rotation angle
-  const angle = Math.atan2(
-    rightEyeCenter.y - leftEyeCenter.y,
-    rightEyeCenter.x - leftEyeCenter.x
-  );
-  
-  // Calculate scale based on eye distance
-  const eyeDistance = Math.sqrt(
-    Math.pow(rightEyeCenter.x - leftEyeCenter.x, 2) +
-    Math.pow(rightEyeCenter.y - leftEyeCenter.y, 2)
-  );
-  const desiredEyeDistance = targetSize * 0.3; // Eyes should be 30% of target width
-  const scale = desiredEyeDistance / eyeDistance;
-  
-  // Create output canvas
-  const canvas = document.createElement("canvas");
-  canvas.width = targetSize;
-  canvas.height = targetSize;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) throw new Error("Cannot create canvas context");
-  
-  // Calculate center point between eyes
-  const eyeCenter = {
-    x: (leftEyeCenter.x + rightEyeCenter.x) / 2,
-    y: (leftEyeCenter.y + rightEyeCenter.y) / 2,
-  };
-  
-  // Apply transformation
-  ctx.translate(targetSize / 2, targetSize * 0.4); // Position eyes at 40% from top
-  ctx.rotate(-angle);
-  ctx.scale(scale, scale);
-  ctx.translate(-eyeCenter.x, -eyeCenter.y);
-  
-  // Draw the video frame
-  ctx.drawImage(video, 0, 0);
-  
-  return canvas;
+export const matchMultipleFaces = (
+  faces: Array<{ box: FaceBoundingBox; score: number; embedding: number[] }>,
+  employees: Array<{
+    id: string;
+    name: string;
+    embeddings?: FaceEmbeddings;
+    embedding?: { vector: number[] };
+  }>,
+  threshold: number = FACE_MATCH_THRESHOLD
+): DetectedFace[] => {
+  return faces.map(face => {
+    const match = findBestMatchMultiEmbedding(face.embedding, employees);
+    
+    const detected: DetectedFace = {
+      boundingBox: face.box,
+      confidence: face.score,
+    };
+    
+    if (match && match.distance <= threshold) {
+      detected.employeeId = match.employeeId;
+      detected.employeeName = match.employeeName;
+      detected.distance = match.distance;
+      detected.matchScore = distanceToSimilarity(match.distance);
+    }
+    
+    return detected;
+  });
 };
-
-// Re-export types
-export type { DetectionResult, FaceBox } from "./mediapipe-face-detection";
-export type { MediaPipeLandmark } from "./mediapipe-face-detection";

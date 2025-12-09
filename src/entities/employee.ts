@@ -9,6 +9,7 @@ export interface FaceEmbeddingEntry {
   angle: FaceAngle;
   createdAt: string;
   quality?: number; // 0-1 quality score
+  imageDataUrl?: string; // Base64 face image captured during enrollment
 }
 
 // Legacy single embedding format (for backward compatibility)

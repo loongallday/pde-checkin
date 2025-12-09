@@ -227,8 +227,14 @@ export const KioskView = ({
 
   useEffect(() => {
     if (status.isDetecting) {
-      const interval = setInterval(() => drawFaceOverlay(), 50);
-      return () => clearInterval(interval);
+      // Use requestAnimationFrame for smooth 60fps overlay
+      let animationId: number;
+      const animate = () => {
+        drawFaceOverlay();
+        animationId = requestAnimationFrame(animate);
+      };
+      animationId = requestAnimationFrame(animate);
+      return () => cancelAnimationFrame(animationId);
     }
   }, [status.isDetecting, drawFaceOverlay]);
 

@@ -91,8 +91,8 @@ export const getMediaPipeModelLoadError = (): string | null => modelLoadError;
 
 // Detection confidence thresholds
 export const MEDIAPIPE_CONFIG = {
-  MIN_CONFIDENCE: 0.5, // Minimum confidence for face detection
-  MIN_VISIBILITY: 0.5, // Minimum visibility for landmarks
+  MIN_CONFIDENCE: 0.7, // Minimum confidence for face detection (increased from 0.5)
+  MIN_VISIBILITY: 0.6, // Minimum visibility for landmarks (increased from 0.5)
 };
 
 /**
@@ -290,35 +290,16 @@ export const detectSingleFaceWithMediaPipe = async (
       return null;
     }
 
-    console.log("[MediaPipe] Calling detectForVideo", {
-      readyState: videoElement.readyState,
-      videoWidth: finalVideoWidth,
-      videoHeight: finalVideoHeight,
-      isConnected: videoElement.isConnected,
-    });
-
     let results;
     try {
-      const detectStart = performance.now();
-      
       // Call detectForVideo - wrap in immediate try-catch to catch any synchronous errors
       // MediaPipe may throw if video element is in an invalid state
       try {
         results = faceLandmarker.detectForVideo(videoElement, startTimeMs);
       } catch (immediateError) {
-        // Catch any immediate synchronous errors
-        const errorMsg = immediateError instanceof Error ? immediateError.message : String(immediateError);
-        // Don't log as error - this is expected in some cases
-        console.debug("[MediaPipe] detectForVideo immediate error (suppressed):", errorMsg);
+        // Catch any immediate synchronous errors - expected in some cases
         return null;
       }
-      
-      const detectDuration = performance.now() - detectStart;
-      console.log("[MediaPipe] detectForVideo completed", {
-        duration: `${detectDuration.toFixed(2)}ms`,
-        hasResults: !!results,
-        landmarksCount: results?.faceLandmarks?.length || 0,
-      });
     } catch (detectError) {
       // Suppress the error from propagating - it's already handled
       // MediaPipe may log errors internally, but we catch and handle them here
