@@ -1,19 +1,7 @@
-import type { Employee, FaceEmbedding } from "@/entities/employee";
+import type { Employee } from "@/entities/employee";
 
-const buildVector = (seed: number): number[] => {
-  return Array.from({ length: 256 }, (_, idx) => {
-    const value = Math.sin(seed * (idx + 1)) + Math.cos((seed + 1) * (idx + 1));
-    return Number(((value + 2) / 4).toFixed(4));
-  });
-};
-
-const createEmbedding = (seed: number): FaceEmbedding => ({
-  version: "simple-v1",
-  createdAt: new Date(Date.now() - seed * 1000 * 60).toISOString(),
-  source: "camera",
-  vector: buildVector(seed),
-});
-
+// Mock employees without pre-enrolled faces
+// Use the Dev Tools to register faces with face-api.js
 export const mockEmployees: Employee[] = [
   {
     id: "emp_jen",
@@ -23,7 +11,7 @@ export const mockEmployees: Employee[] = [
     department: "HR",
     avatarUrl: "https://api.dicebear.com/9.x/initials/svg?seed=JK",
     lastCheckIn: new Date(Date.now() - 1000 * 60 * 45).toISOString(),
-    embedding: createEmbedding(42),
+    // No embedding - needs to be enrolled with face-api.js
   },
   {
     id: "emp_omar",
@@ -33,7 +21,7 @@ export const mockEmployees: Employee[] = [
     department: "Security",
     avatarUrl: "https://api.dicebear.com/9.x/initials/svg?seed=OS",
     lastCheckIn: new Date(Date.now() - 1000 * 60 * 130).toISOString(),
-    embedding: createEmbedding(77),
+    // No embedding - needs to be enrolled with face-api.js
   },
   {
     id: "emp_ami",
@@ -43,6 +31,6 @@ export const mockEmployees: Employee[] = [
     department: "Insights",
     avatarUrl: "https://api.dicebear.com/9.x/initials/svg?seed=AP",
     lastCheckIn: new Date(Date.now() - 1000 * 60 * 720).toISOString(),
-    embedding: createEmbedding(13),
+    // No embedding - needs to be enrolled with face-api.js
   },
 ];

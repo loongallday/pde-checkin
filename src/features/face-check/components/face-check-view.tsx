@@ -22,8 +22,10 @@ import { formatRelativeTime } from "@/shared/lib/datetime";
 import type { FaceMatchResult, Employee } from "@/entities/employee";
 import type { EmployeeRepositoryKind } from "@/shared/repositories/employee-repository";
 import type { FaceCheckPhase } from "../hooks/use-face-check-view-model";
+import type { DetectedFace } from "@/shared/lib/face-embedding";
 import { FaceCaptureSection, phaseLabel } from "./face-capture-section";
 import { FaceMatchResultCard } from "./face-match-result-card";
+import { Input } from "@/components/ui/input";
 
 interface FaceCheckViewProps {
   employees: Employee[];
@@ -34,20 +36,24 @@ interface FaceCheckViewProps {
     isLoadingEmployees: boolean;
     isCameraSupported: boolean;
     isDetecting: boolean;
+    modelsReady: boolean;
   };
   videoRef: RefObject<HTMLVideoElement | null>;
   matchResult: FaceMatchResult | null;
   snapshot: string | null;
   error: string | null;
+  detectedFaces: DetectedFace[];
+  getVideoDimensions: () => { width: number; height: number };
   actions: {
     initializeCamera: () => Promise<void> | void;
     startDetection: () => void;
     stopDetection: () => void;
     confirmCheckIn: () => Promise<boolean>;
-    captureForEnrollment: () => boolean;
+    captureForEnrollment: () => Promise<boolean>;
     enrollFromLastCapture: (employeeId: string) => Promise<boolean>;
     stopCamera: () => void;
     resetSession: () => void;
+    addTestEmployee: (name: string) => Promise<Employee | null>;
   };
 }
 
@@ -65,10 +71,15 @@ export const FaceCheckView = ({
   matchResult,
   snapshot,
   error,
+  detectedFaces,
+  getVideoDimensions,
   actions,
 }: FaceCheckViewProps) => {
   const [selectedEmployeeForEnroll, setSelectedEmployeeForEnroll] = useState<string>("");
   const [showEnrollment, setShowEnrollment] = useState(false);
+  const [showDevTools, setShowDevTools] = useState(false);
+  const [newEmployeeName, setNewEmployeeName] = useState("");
+  const [isAddingEmployee, setIsAddingEmployee] = useState(false);
 
   const repositoryDescription =
     repositoryKind === "supabase"
@@ -88,7 +99,20 @@ export const FaceCheckView = ({
   };
 
   const handleCaptureForEnrollment = () => {
-    actions.captureForEnrollment();
+    void actions.captureForEnrollment();
+  };
+
+  const handleAddTestEmployee = async () => {
+    if (!newEmployeeName.trim()) return;
+    setIsAddingEmployee(true);
+    try {
+      const result = await actions.addTestEmployee(newEmployeeName.trim());
+      if (result) {
+        setNewEmployeeName("");
+      }
+    } finally {
+      setIsAddingEmployee(false);
+    }
   };
 
   return (
@@ -148,6 +172,8 @@ export const FaceCheckView = ({
           phase={status.phase}
           isCameraSupported={status.isCameraSupported}
           isDetecting={status.isDetecting}
+          detectedFaces={detectedFaces}
+          getVideoDimensions={getVideoDimensions}
           onInitializeCamera={actions.initializeCamera}
           onStartDetection={actions.startDetection}
           onStopDetection={actions.stopDetection}
@@ -209,6 +235,68 @@ export const FaceCheckView = ({
                 <div className="overflow-hidden rounded-xl border">
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img src={snapshot} alt="ภาพถ่ายสำหรับลงทะเบียน" className="h-48 w-full object-cover" />
+                </div>
+              )}
+            </CardContent>
+          )}
+        </Card>
+
+        {/* Dev Tools Section - For testing */}
+        <Card className="border-dashed border-amber-500/50">
+          <CardHeader 
+            className="cursor-pointer" 
+            onClick={() => setShowDevTools(!showDevTools)}
+          >
+            <div className="flex items-center justify-between">
+              <div>
+                <CardTitle className="text-base flex items-center gap-2">
+                  <span className="text-amber-500">🛠️</span>
+                  เครื่องมือพัฒนา (Dev Tools)
+                </CardTitle>
+                <CardDescription>
+                  เพิ่มพนักงานทดสอบพร้อมข้อมูลใบหน้าจากกล้อง
+                </CardDescription>
+              </div>
+              <Badge variant="outline" className="border-amber-500/50 text-amber-600">
+                {showDevTools ? "ซ่อน" : "แสดง"}
+              </Badge>
+            </div>
+          </CardHeader>
+          {showDevTools && (
+            <CardContent className="space-y-4">
+              <Alert className="border-amber-500/30 bg-amber-50 dark:bg-amber-950/20">
+                <AlertTitle className="text-amber-700 dark:text-amber-400">สำหรับการทดสอบเท่านั้น</AlertTitle>
+                <AlertDescription className="text-amber-600 dark:text-amber-500">
+                  ฟีเจอร์นี้จะเพิ่มพนักงานใหม่พร้อมลงทะเบียนใบหน้าจากกล้องทันที เหมาะสำหรับทดสอบระบบ
+                </AlertDescription>
+              </Alert>
+              <div className="space-y-2">
+                <Label htmlFor="new-employee-name">ชื่อพนักงานทดสอบ</Label>
+                <div className="flex gap-3">
+                  <Input
+                    id="new-employee-name"
+                    placeholder="เช่น สมชาย ใจดี"
+                    value={newEmployeeName}
+                    onChange={(e) => setNewEmployeeName(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        void handleAddTestEmployee();
+                      }
+                    }}
+                  />
+                  <Button 
+                    onClick={() => void handleAddTestEmployee()}
+                    disabled={!newEmployeeName.trim() || isAddingEmployee || status.phase !== "camera-ready"}
+                    className="bg-amber-500 hover:bg-amber-600 text-white"
+                  >
+                    {isAddingEmployee ? "กำลังเพิ่ม..." : "เพิ่ม + ลงทะเบียนใบหน้า"}
+                  </Button>
+                </div>
+              </div>
+              {snapshot && newEmployeeName && (
+                <div className="overflow-hidden rounded-xl border border-amber-500/30">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={snapshot} alt="ภาพถ่ายสำหรับทดสอบ" className="h-48 w-full object-cover" />
                 </div>
               )}
             </CardContent>

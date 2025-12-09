@@ -22,6 +22,7 @@ export interface EmployeeRepository {
   listEmployees(): Promise<Employee[]>;
   recordCheckIn(event: FaceCheckEventPayload): Promise<void>;
   upsertEmbedding(employeeId: string, embedding: FaceEmbedding): Promise<void>;
+  addEmployee?(employee: Employee): Promise<void>;
 }
 
 class SupabaseEmployeeRepository implements EmployeeRepository {
@@ -144,6 +145,10 @@ class InMemoryEmployeeRepository implements EmployeeRepository {
           }
         : employee,
     );
+  }
+
+  async addEmployee(employee: Employee): Promise<void> {
+    this.employees = [...this.employees, employee];
   }
 }
 

@@ -7,13 +7,21 @@ import type {
   FaceEmbedding,
   FaceMatchResult,
 } from "@/entities/employee";
-import { FACE_MATCH_THRESHOLD, captureEmbeddingFromVideo } from "@/shared/lib/face-embedding";
-import { cosineSimilarity } from "@/shared/lib/math";
+import { 
+  FACE_MATCH_THRESHOLD, 
+  captureEmbeddingFromVideoAsync,
+  detectFacesInVideo,
+  compareFaces,
+  distanceToSimilarity,
+  initializeFaceDetection,
+  type DetectedFace,
+} from "@/shared/lib/face-embedding";
 import type { EmployeeRepository } from "@/shared/repositories/employee-repository";
 
 export type FaceCheckPhase =
   | "idle"
   | "loading-employees"
+  | "loading-models"
   | "camera-initializing"
   | "camera-ready"
   | "detecting"
@@ -27,16 +35,13 @@ interface UseFaceCheckViewModelOptions {
   repository: EmployeeRepository;
 }
 
-const DETECTION_INTERVAL_MS = 1500; // Scan every 1.5 seconds
-
-const alignVectors = (a: number[], b: number[]): [number[], number[]] => {
-  const size = Math.min(a.length, b.length);
-  return [a.slice(0, size), b.slice(0, size)];
-};
+const DETECTION_INTERVAL_MS = 500; // Fast scanning with AI detection
+const FACE_OVERLAY_INTERVAL_MS = 150; // Face overlay updates
 
 interface EmployeeMatch {
   employee: Employee;
-  score: number;
+  distance: number;  // Euclidean distance (lower = better match)
+  similarity: number; // Converted to 0-1 scale for display
 }
 
 export const useFaceCheckViewModel = ({
@@ -51,14 +56,36 @@ export const useFaceCheckViewModel = ({
   const [isLoadingEmployees, setIsLoadingEmployees] = useState(false);
   const [snapshot, setSnapshot] = useState<string | null>(null);
   const [isDetecting, setIsDetecting] = useState(false);
+  const [detectedFaces, setDetectedFaces] = useState<DetectedFace[]>([]);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const latestEmbeddingRef = useRef<number[] | null>(null);
   const detectionIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const faceOverlayIntervalRef = useRef<NodeJS.Timeout | null>(null);
+
+  const [modelsReady, setModelsReady] = useState(false);
 
   useEffect(() => {
     setIsCameraSupported(Boolean(navigator?.mediaDevices?.getUserMedia));
+  }, []);
+
+  // Load face detection models on mount
+  useEffect(() => {
+    const loadModels = async () => {
+      setPhase("loading-models");
+      try {
+        const loaded = await initializeFaceDetection();
+        setModelsReady(loaded);
+        if (!loaded) {
+          console.warn("Face detection models failed to load - using fallback");
+        }
+      } catch (err) {
+        console.error("Failed to load face models:", err);
+      }
+      setPhase("idle");
+    };
+    loadModels();
   }, []);
 
   useEffect(() => {
@@ -86,7 +113,12 @@ export const useFaceCheckViewModel = ({
       clearInterval(detectionIntervalRef.current);
       detectionIntervalRef.current = null;
     }
+    if (faceOverlayIntervalRef.current) {
+      clearInterval(faceOverlayIntervalRef.current);
+      faceOverlayIntervalRef.current = null;
+    }
     setIsDetecting(false);
+    setDetectedFaces([]);
   }, []);
 
   const stopCamera = useCallback(() => {
@@ -147,8 +179,12 @@ export const useFaceCheckViewModel = ({
     [],
   );
 
-  // Find the best matching employee from all enrolled employees
+  // Find the best matching employee from all enrolled employees using euclidean distance
   const findBestMatch = useCallback((capturedEmbedding: number[]): EmployeeMatch | null => {
+    if (!capturedEmbedding || capturedEmbedding.length === 0) {
+      return null;
+    }
+
     const enrolledEmployees = employees.filter(
       (emp) => emp.embedding?.vector?.length
     );
@@ -160,21 +196,48 @@ export const useFaceCheckViewModel = ({
     let bestMatch: EmployeeMatch | null = null;
 
     for (const employee of enrolledEmployees) {
-      if (!employee.embedding?.vector) continue;
+      if (!employee.embedding?.vector || employee.embedding.vector.length === 0) continue;
 
-      const [candidateVector, referenceVector] = alignVectors(
-        capturedEmbedding,
-        employee.embedding.vector,
-      );
-      const score = cosineSimilarity(candidateVector, referenceVector);
+      // Use euclidean distance - lower is better
+      const distance = compareFaces(capturedEmbedding, employee.embedding.vector);
+      const similarity = distanceToSimilarity(distance);
 
-      if (!bestMatch || score > bestMatch.score) {
-        bestMatch = { employee, score };
+      // Best match has lowest distance
+      if (!bestMatch || distance < bestMatch.distance) {
+        bestMatch = { employee, distance, similarity };
       }
     }
 
     return bestMatch;
   }, [employees]);
+
+  // Update face overlay with current detection
+  const updateFaceOverlay = useCallback(async () => {
+    try {
+      if (!videoRef.current) return;
+      
+      const faces = await detectFacesInVideo(videoRef.current);
+      if (faces.length > 0) {
+        // Try to match detected face
+        const capture = await captureEmbeddingFromVideoAsync(videoRef.current);
+        const bestMatch = findBestMatch(capture.embedding);
+        
+        // Show name if distance is reasonable (within 1.5x threshold)
+        const showName = bestMatch && bestMatch.distance <= FACE_MATCH_THRESHOLD * 1.5;
+        
+        setDetectedFaces(faces.map((boundingBox) => ({
+          boundingBox,
+          confidence: capture.confidence ?? (capture.faceDetected ? 0.9 : 0.5),
+          employeeName: showName ? bestMatch.employee.fullName : undefined,
+          matchScore: bestMatch?.similarity,
+        })));
+      } else {
+        setDetectedFaces([]);
+      }
+    } catch {
+      // Silently continue
+    }
+  }, [findBestMatch]);
 
   // Auto-detect and verify against all employees
   const autoDetectAndVerify = useCallback(async (): Promise<boolean> => {
@@ -183,15 +246,34 @@ export const useFaceCheckViewModel = ({
         return false; // Silently fail during detection loop
       }
 
-      const capture = captureEmbeddingFromVideo(videoRef.current);
+      const capture = await captureEmbeddingFromVideoAsync(videoRef.current);
+      
+      // Skip if no face detected
+      if (!capture.faceDetected || capture.embedding.length === 0) {
+        setDetectedFaces([]);
+        return false;
+      }
+
       const bestMatch = findBestMatch(capture.embedding);
+
+      // Update face overlay with current match info
+      if (capture.boundingBox) {
+        const showName = bestMatch && bestMatch.distance <= FACE_MATCH_THRESHOLD * 1.5;
+        setDetectedFaces([{
+          boundingBox: capture.boundingBox,
+          confidence: capture.confidence ?? 0.9,
+          employeeName: showName ? bestMatch.employee.fullName : undefined,
+          matchScore: bestMatch?.similarity,
+        }]);
+      }
 
       if (!bestMatch) {
         // No enrolled employees, continue scanning
         return false;
       }
 
-      if (bestMatch.score >= FACE_MATCH_THRESHOLD) {
+      // Check if distance is below threshold (match found)
+      if (bestMatch.distance <= FACE_MATCH_THRESHOLD) {
         // Found a match! Stop detection and show result
         stopDetection();
         
@@ -205,7 +287,7 @@ export const useFaceCheckViewModel = ({
           employeeId: bestMatch.employee.id,
           capturedAt: new Date().toISOString(),
           snapshotDataUrl: capture.dataUrl,
-          score: Number(bestMatch.score.toFixed(4)),
+          score: Number(bestMatch.similarity.toFixed(4)),
           threshold: FACE_MATCH_THRESHOLD,
           status: "matched",
           message: `ตรวจพบ ${bestMatch.employee.fullName}`,
@@ -217,7 +299,7 @@ export const useFaceCheckViewModel = ({
         return isMatch;
       }
 
-      // No match above threshold, continue scanning
+      // No match within threshold, continue scanning
       return false;
     } catch {
       // Silently continue on errors during detection
@@ -245,6 +327,11 @@ export const useFaceCheckViewModel = ({
     setDetectedEmployee(null);
     setMatchResult(null);
 
+    // Start face overlay updates (faster interval)
+    faceOverlayIntervalRef.current = setInterval(() => {
+      void updateFaceOverlay();
+    }, FACE_OVERLAY_INTERVAL_MS);
+
     // Start detection loop
     detectionIntervalRef.current = setInterval(() => {
       void autoDetectAndVerify();
@@ -252,7 +339,7 @@ export const useFaceCheckViewModel = ({
 
     // Run first detection immediately
     void autoDetectAndVerify();
-  }, [employees, autoDetectAndVerify]);
+  }, [employees, autoDetectAndVerify, updateFaceOverlay]);
 
   // Confirm check-in for detected employee
   const confirmCheckIn = useCallback(async () => {
@@ -322,7 +409,7 @@ export const useFaceCheckViewModel = ({
   }, [employees, repository, snapshot]);
 
   // Capture a single frame for enrollment purposes
-  const captureForEnrollment = useCallback(() => {
+  const captureForEnrollment = useCallback(async () => {
     try {
       if (!videoRef.current) {
         throw new Error("สตรีมกล้องยังไม่พร้อม");
@@ -331,7 +418,12 @@ export const useFaceCheckViewModel = ({
       setPhase("capturing");
       setError(null);
 
-      const capture = captureEmbeddingFromVideo(videoRef.current);
+      const capture = await captureEmbeddingFromVideoAsync(videoRef.current);
+      
+      if (!capture.faceDetected || capture.embedding.length === 0) {
+        throw new Error("ไม่พบใบหน้าในภาพ กรุณาหันหน้าเข้าหากล้อง");
+      }
+
       latestEmbeddingRef.current = capture.embedding;
       setSnapshot(capture.dataUrl);
       setPhase("camera-ready");
@@ -352,7 +444,67 @@ export const useFaceCheckViewModel = ({
     latestEmbeddingRef.current = null;
     setPhase(streamRef.current ? "camera-ready" : "idle");
     setError(null);
+    setDetectedFaces([]);
   }, [stopDetection]);
+
+  // Add a test employee with current face (dev purpose)
+  const addTestEmployee = useCallback(async (name: string) => {
+    try {
+      if (!videoRef.current) {
+        throw new Error("กรุณาเริ่มกล้องก่อน");
+      }
+
+      setPhase("capturing");
+      setError(null);
+
+      const capture = await captureEmbeddingFromVideoAsync(videoRef.current);
+      
+      if (!capture.faceDetected || capture.embedding.length === 0) {
+        throw new Error("ไม่พบใบหน้าในภาพ กรุณาหันหน้าเข้าหากล้อง");
+      }
+      
+      const testEmployee: Employee = {
+        id: `test_${Date.now()}`,
+        fullName: name,
+        email: `${name.toLowerCase().replace(/\s+/g, '.')}@test.local`,
+        role: "Test Employee",
+        department: "Development",
+        avatarUrl: `https://api.dicebear.com/9.x/initials/svg?seed=${encodeURIComponent(name)}`,
+        lastCheckIn: undefined,
+        embedding: {
+          version: "faceapi-v1", // Updated version for face-api.js embeddings
+          vector: capture.embedding,
+          createdAt: new Date().toISOString(),
+          source: "camera",
+        },
+      };
+
+      // Add to repository
+      if (repository.addEmployee) {
+        await repository.addEmployee(testEmployee);
+      }
+      
+      // Update local state
+      setEmployees((prev) => [...prev, testEmployee]);
+      setSnapshot(capture.dataUrl);
+      setPhase("camera-ready");
+
+      return testEmployee;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "ไม่สามารถเพิ่มพนักงานทดสอบได้");
+      setPhase("error");
+      return null;
+    }
+  }, [repository]);
+
+  // Get video dimensions for coordinate mapping
+  const getVideoDimensions = useCallback(() => {
+    if (!videoRef.current) return { width: 640, height: 640 };
+    return {
+      width: videoRef.current.videoWidth || 640,
+      height: videoRef.current.videoHeight || 640,
+    };
+  }, []);
 
   return useMemo(
     () => ({
@@ -364,11 +516,14 @@ export const useFaceCheckViewModel = ({
         isLoadingEmployees,
         isCameraSupported,
         isDetecting,
+        modelsReady,
       },
       videoRef,
       matchResult,
       snapshot,
       error,
+      detectedFaces,
+      getVideoDimensions,
       actions: {
         initializeCamera,
         startDetection,
@@ -378,6 +533,7 @@ export const useFaceCheckViewModel = ({
         enrollFromLastCapture,
         stopCamera,
         resetSession,
+        addTestEmployee,
       },
     }),
     [
@@ -388,9 +544,12 @@ export const useFaceCheckViewModel = ({
       isLoadingEmployees,
       isCameraSupported,
       isDetecting,
+      modelsReady,
       matchResult,
       snapshot,
       error,
+      detectedFaces,
+      getVideoDimensions,
       initializeCamera,
       startDetection,
       stopDetection,
@@ -399,6 +558,7 @@ export const useFaceCheckViewModel = ({
       enrollFromLastCapture,
       stopCamera,
       resetSession,
+      addTestEmployee,
     ],
   );
 };

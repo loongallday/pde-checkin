@@ -1,4 +1,4 @@
-export type FaceEmbeddingVersion = "simple-v1";
+export type FaceEmbeddingVersion = "simple-v1" | "faceapi-v1";
 
 export interface FaceEmbedding {
   version: FaceEmbeddingVersion;
