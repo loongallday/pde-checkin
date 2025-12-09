@@ -219,6 +219,56 @@ export const createFaceEmbeddings = (
 };
 
 /**
+ * Aggregate a new embedding into existing embeddings
+ */
+export const aggregateEmbedding = (
+  existingEmbeddings: FaceEmbeddings | undefined,
+  newEntry: FaceEmbeddingEntry,
+  config: { maxEmbeddings: number; replaceThreshold: number }
+): FaceEmbeddings => {
+  const now = new Date().toISOString();
+  
+  if (!existingEmbeddings || !existingEmbeddings.entries.length) {
+    return {
+      version: "faceapi-v1",
+      entries: [newEntry],
+      averageVector: newEntry.vector,
+      createdAt: now,
+      updatedAt: now,
+      source: "camera",
+    };
+  }
+
+  const entries = [...existingEmbeddings.entries];
+  const newQuality = newEntry.quality ?? 0.5;
+
+  if (entries.length < config.maxEmbeddings) {
+    entries.push(newEntry);
+  } else {
+    // Find lowest quality to replace
+    let lowestIdx = 0;
+    let lowestQuality = entries[0].quality ?? 0.5;
+    for (let i = 1; i < entries.length; i++) {
+      const q = entries[i].quality ?? 0.5;
+      if (q < lowestQuality) {
+        lowestQuality = q;
+        lowestIdx = i;
+      }
+    }
+    if (newQuality > lowestQuality + config.replaceThreshold) {
+      entries[lowestIdx] = newEntry;
+    }
+  }
+
+  return {
+    ...existingEmbeddings,
+    entries,
+    averageVector: computeAverageEmbedding(entries.map(e => e.vector)),
+    updatedAt: now,
+  };
+};
+
+/**
  * Find best match for a single face
  */
 export const findBestMatchMultiEmbedding = (
