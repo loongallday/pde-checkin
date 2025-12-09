@@ -21,7 +21,7 @@ import { formatRelativeTime } from "@/shared/lib/datetime";
 import type { FaceMatchResult, Employee } from "@/entities/employee";
 import type { EmployeeRepositoryKind } from "@/shared/repositories/employee-repository";
 import type { FaceCheckPhase } from "../hooks/use-face-check-view-model";
-import { FaceCaptureSection } from "./face-capture-section";
+import { FaceCaptureSection, phaseLabel } from "./face-capture-section";
 import { FaceMatchResultCard } from "./face-match-result-card";
 
 interface FaceCheckViewProps {
@@ -49,7 +49,7 @@ interface FaceCheckViewProps {
 
 const repositoryLabel: Record<EmployeeRepositoryKind, string> = {
   supabase: "Supabase",
-  memory: "In-memory mock data",
+  memory: "ข้อมูลจำลองในหน่วยความจำ",
 };
 
 const getSelectedEmployee = (employees: Employee[], selectedId: string) =>
@@ -71,8 +71,8 @@ export const FaceCheckView = ({
   const selectedEmployee = getSelectedEmployee(employees, selectedEmployeeId);
   const repositoryDescription =
     repositoryKind === "supabase"
-      ? "Live data via Supabase — add your credentials to NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY."
-      : "Using local mock data so you can demo the workflow without credentials.";
+      ? "ข้อมูลแบบเรียลไทม์ผ่าน Supabase — เพิ่มข้อมูลประจำตัวของคุณใน NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY"
+      : "ใช้ข้อมูลจำลองในเครื่องเพื่อทดสอบเวิร์กโฟลว์โดยไม่ต้องใช้ข้อมูลประจำตัว";
 
   const handleEmployeeChange = (value: string) => {
     startTransition(() => {
@@ -91,8 +91,8 @@ export const FaceCheckView = ({
 
   return (
     <AppShell
-      title="Face Recognition Check-In"
-      subtitle="Capture an employee photo, compare embeddings, and persist the event."
+      title="ระบบเช็คชื่อด้วยใบหน้า"
+      subtitle="ถ่ายภาพพนักงาน เปรียบเทียบข้อมูลใบหน้า และบันทึกเหตุการณ์"
       rightSlot={
         <Badge variant="outline" className="text-xs">
           {repositoryLabel[repositoryKind]}
@@ -102,15 +102,15 @@ export const FaceCheckView = ({
       <div className="space-y-4">
         <Card>
           <CardHeader>
-            <CardTitle>Employee selection</CardTitle>
-            <CardDescription>Choose who is trying to check in.</CardDescription>
+            <CardTitle>เลือกพนักงาน</CardTitle>
+            <CardDescription>เลือกผู้ที่ต้องการเช็คชื่อ</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="space-y-2">
-              <Label htmlFor="employee">Employee</Label>
+              <Label htmlFor="employee">พนักงาน</Label>
               <Select value={selectedEmployeeId} onValueChange={handleEmployeeChange}>
                 <SelectTrigger id="employee" className="w-full">
-                  <SelectValue placeholder="Select an employee" />
+                  <SelectValue placeholder="เลือกพนักงาน" />
                 </SelectTrigger>
                 <SelectContent>
                   {employees.map((employee) => (
@@ -134,11 +134,11 @@ export const FaceCheckView = ({
                     {selectedEmployee.department ? ` · ${selectedEmployee.department}` : null}
                   </p>
                   <p className="text-xs text-muted-foreground">
-                    Last check-in · {formatRelativeTime(selectedEmployee.lastCheckIn)}
+                    เช็คชื่อล่าสุด · {formatRelativeTime(selectedEmployee.lastCheckIn)}
                   </p>
                 </div>
                 <Badge variant={selectedEmployee.embedding ? "default" : "secondary"}>
-                  {selectedEmployee.embedding ? "Enrolled" : "Needs baseline"}
+                  {selectedEmployee.embedding ? "ลงทะเบียนแล้ว" : "ต้องลงทะเบียน"}
                 </Badge>
               </div>
             ) : null}
@@ -158,24 +158,24 @@ export const FaceCheckView = ({
       <div className="space-y-4">
         <Card>
           <CardHeader>
-            <CardTitle>System status</CardTitle>
-            <CardDescription>Live insight into the processing pipeline.</CardDescription>
+            <CardTitle>สถานะระบบ</CardTitle>
+            <CardDescription>ข้อมูลสถานะการประมวลผลแบบเรียลไทม์</CardDescription>
           </CardHeader>
           <CardContent className="space-y-3 text-sm text-muted-foreground">
             <div className="flex items-center justify-between">
-              <span>Phase</span>
-              <span className="font-medium text-foreground">{status.phase}</span>
+              <span>สถานะ</span>
+              <span className="font-medium text-foreground">{phaseLabel[status.phase]}</span>
             </div>
             <Separator />
             <div className="flex items-center justify-between">
-              <span>Employee records</span>
+              <span>ข้อมูลพนักงาน</span>
               <span className="font-medium text-foreground">
-                {status.isLoadingEmployees ? "Loading" : `${employees.length} available`}
+                {status.isLoadingEmployees ? "กำลังโหลด" : `${employees.length} คน`}
               </span>
             </div>
             <Separator />
             <div className="space-y-1">
-              <span className="text-xs uppercase tracking-wide text-muted-foreground">Repository</span>
+              <span className="text-xs uppercase tracking-wide text-muted-foreground">แหล่งข้อมูล</span>
               <p className="text-sm text-foreground">{repositoryLabel[repositoryKind]}</p>
               <p className="text-xs text-muted-foreground">{repositoryDescription}</p>
             </div>
@@ -190,10 +190,9 @@ export const FaceCheckView = ({
         />
 
         <Alert>
-          <AlertTitle>Supabase credentials required</AlertTitle>
+          <AlertTitle>ต้องใช้ข้อมูลประจำตัว Supabase</AlertTitle>
           <AlertDescription>
-            Set NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY, then restart the dev server to
-            persist check-ins remotely.
+            ตั้งค่า NEXT_PUBLIC_SUPABASE_URL และ NEXT_PUBLIC_SUPABASE_ANON_KEY แล้วรีสตาร์ทเซิร์ฟเวอร์เพื่อบันทึกการเช็คชื่อแบบออนไลน์
           </AlertDescription>
         </Alert>
       </div>

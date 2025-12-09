@@ -62,7 +62,7 @@ export const useFaceCheckViewModel = ({
         setSelectedEmployeeId((prev) => prev || data[0]?.id || "");
         setPhase("idle");
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to load employees");
+        setError(err instanceof Error ? err.message : "ไม่สามารถโหลดข้อมูลพนักงานได้");
         setPhase("error");
       } finally {
         setIsLoadingEmployees(false);
@@ -84,7 +84,7 @@ export const useFaceCheckViewModel = ({
 
   const initializeCamera = useCallback(async () => {
     if (!navigator?.mediaDevices?.getUserMedia) {
-      setError("Camera is not supported on this device.");
+      setError("อุปกรณ์นี้ไม่รองรับกล้อง");
       setPhase("error");
       return;
     }
@@ -113,7 +113,7 @@ export const useFaceCheckViewModel = ({
       setError(
         err instanceof Error
           ? err.message
-          : "We were not able to access the employee camera stream.",
+          : "ไม่สามารถเข้าถึงสตรีมกล้องได้",
       );
     }
   }, []);
@@ -132,12 +132,12 @@ export const useFaceCheckViewModel = ({
   const captureAndVerify = useCallback(async () => {
     try {
       if (!videoRef.current) {
-        throw new Error("Camera feed is not ready.");
+        throw new Error("สตรีมกล้องยังไม่พร้อม");
       }
 
       const employee = employees.find((item) => item.id === selectedEmployeeId);
       if (!employee) {
-        throw new Error("Please select an employee to check in.");
+        throw new Error("กรุณาเลือกพนักงานเพื่อเช็คชื่อ");
       }
 
       setPhase("capturing");
@@ -151,7 +151,7 @@ export const useFaceCheckViewModel = ({
 
       if (!employee.embedding?.vector?.length) {
         throw new Error(
-          `${employee.fullName} does not have a baseline face embedding yet. Please enroll them first.`,
+          `${employee.fullName} ยังไม่มีข้อมูลใบหน้าเป็นฐาน กรุณาลงทะเบียนก่อน`,
         );
       }
 
@@ -170,8 +170,8 @@ export const useFaceCheckViewModel = ({
         threshold: FACE_MATCH_THRESHOLD,
         status: isMatch ? "matched" : "mismatch",
         message: isMatch
-          ? `${employee.fullName} successfully checked in.`
-          : `Face mismatch detected for ${employee.fullName}.`,
+          ? `${employee.fullName} เช็คชื่อสำเร็จ`
+          : `ตรวจพบใบหน้าไม่ตรงกันสำหรับ ${employee.fullName}`,
       };
 
       setMatchResult(newResult);
@@ -183,13 +183,13 @@ export const useFaceCheckViewModel = ({
         );
       } catch (repoError) {
         setError(
-          repoError instanceof Error ? repoError.message : "Unable to persist check-in event.",
+          repoError instanceof Error ? repoError.message : "ไม่สามารถบันทึกการเช็คชื่อได้",
         );
       }
 
       return isMatch;
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to complete face verification.");
+      setError(err instanceof Error ? err.message : "ไม่สามารถตรวจสอบใบหน้าได้");
       setPhase("error");
       return false;
     }
@@ -199,11 +199,11 @@ export const useFaceCheckViewModel = ({
     try {
       const employee = employees.find((item) => item.id === selectedEmployeeId);
       if (!employee) {
-        throw new Error("Select an employee to enroll.");
+        throw new Error("เลือกพนักงานเพื่อลงทะเบียน");
       }
 
       if (!latestEmbeddingRef.current || !snapshot) {
-        throw new Error("Capture a face snapshot before enrolling.");
+        throw new Error("กรุณาถ่ายภาพใบหน้าก่อนลงทะเบียน");
       }
 
       const embedding: FaceEmbedding = {
@@ -219,7 +219,7 @@ export const useFaceCheckViewModel = ({
       );
       return true;
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to enroll baseline embedding.");
+      setError(err instanceof Error ? err.message : "ไม่สามารถลงทะเบียนข้อมูลใบหน้าเป็นฐานได้");
       setPhase("error");
       return false;
     }

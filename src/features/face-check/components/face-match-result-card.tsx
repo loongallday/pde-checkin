@@ -19,40 +19,40 @@ export const FaceMatchResultCard = ({ result, onReset, onEnroll, hasSnapshot }: 
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Match Insights</CardTitle>
-        <CardDescription>Review the latest verification signal.</CardDescription>
+        <CardTitle>ผลการตรวจสอบ</CardTitle>
+        <CardDescription>ตรวจสอบผลการยืนยันตัวตนล่าสุด</CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
         {result ? (
           <div className="space-y-4">
             <div className="flex items-center justify-between">
-              <Badge variant={statusVariant}>{result.status.toUpperCase()}</Badge>
+              <Badge variant={statusVariant}>{result.status === "matched" ? "ตรงกัน" : "ไม่ตรงกัน"}</Badge>
               <p className="text-sm text-muted-foreground">
-                Threshold {Math.round(result.threshold * 100)}%
+                ค่าขั้นต่ำ {Math.round(result.threshold * 100)}%
               </p>
             </div>
             <div className="space-y-2">
-              <p className="text-sm font-medium text-foreground">Similarity score</p>
+              <p className="text-sm font-medium text-foreground">คะแนนความคล้ายคลึง</p>
               <Progress value={percentage} className="h-2" />
               <p className="text-xs text-muted-foreground">{result.message}</p>
             </div>
             {hasSnapshot ? (
               <div className="overflow-hidden rounded-xl border">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={result.snapshotDataUrl} alt="Face snapshot" className="h-48 w-full object-cover" />
+                <img src={result.snapshotDataUrl} alt="ภาพใบหน้า" className="h-48 w-full object-cover" />
               </div>
             ) : null}
           </div>
         ) : (
-          <p className="text-sm text-muted-foreground">Capture a frame to see results here.</p>
+          <p className="text-sm text-muted-foreground">ถ่ายภาพเพื่อดูผลลัพธ์ที่นี่</p>
         )}
       </CardContent>
       <CardFooter className="flex flex-wrap gap-3">
         <Button variant="outline" onClick={onReset} className="flex-1" disabled={!result && !hasSnapshot}>
-          Reset session
+          รีเซ็ตเซสชัน
         </Button>
         <Button onClick={onEnroll} disabled={!hasSnapshot} className="flex-1">
-          Use snapshot as baseline
+          ใช้ภาพนี้เป็นฐานข้อมูล
         </Button>
       </CardFooter>
     </Card>

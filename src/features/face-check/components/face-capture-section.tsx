@@ -16,16 +16,16 @@ interface FaceCaptureSectionProps {
   onCapture: () => Promise<boolean> | void;
 }
 
-const phaseLabel: Record<FaceCheckPhase, string> = {
-  idle: "Idle",
-  "loading-employees": "Loading employees",
-  "camera-initializing": "Preparing camera",
-  "camera-ready": "Camera ready",
-  capturing: "Capturing frame",
-  verifying: "Verifying face",
-  matched: "Match found",
-  mismatch: "Mismatch detected",
-  error: "Error",
+export const phaseLabel: Record<FaceCheckPhase, string> = {
+  idle: "พร้อม",
+  "loading-employees": "กำลังโหลดข้อมูลพนักงาน",
+  "camera-initializing": "กำลังเตรียมกล้อง",
+  "camera-ready": "กล้องพร้อมใช้งาน",
+  capturing: "กำลังถ่ายภาพ",
+  verifying: "กำลังตรวจสอบใบหน้า",
+  matched: "พบความตรงกัน",
+  mismatch: "ตรวจพบความไม่ตรงกัน",
+  error: "ข้อผิดพลาด",
 };
 
 export const FaceCaptureSection = ({
@@ -42,8 +42,8 @@ export const FaceCaptureSection = ({
     <Card className="overflow-hidden">
       <CardHeader className="flex flex-row items-center justify-between">
         <div>
-          <CardTitle>Live Camera</CardTitle>
-          <CardDescription>Start the feed and capture a face snapshot.</CardDescription>
+          <CardTitle>กล้องถ่ายทอดสด</CardTitle>
+          <CardDescription>เริ่มการถ่ายทอดและถ่ายภาพใบหน้า</CardDescription>
         </div>
         <Badge variant={phase === "matched" ? "default" : phase === "mismatch" ? "destructive" : "secondary"}>
           {phaseLabel[phase]}
@@ -52,10 +52,9 @@ export const FaceCaptureSection = ({
       <CardContent className="space-y-4">
         {!isCameraSupported ? (
           <Alert variant="destructive">
-            <AlertTitle>Camera unavailable</AlertTitle>
+            <AlertTitle>ไม่สามารถใช้กล้องได้</AlertTitle>
             <AlertDescription>
-              This device does not expose a camera stream. Connect a webcam or use a mobile device to run the
-              check-in.
+              อุปกรณ์นี้ไม่สามารถเข้าถึงกล้องได้ กรุณาเชื่อมต่อเว็บแคมหรือใช้อุปกรณ์มือถือเพื่อทำการเช็คชื่อ
             </AlertDescription>
           </Alert>
         ) : (
@@ -69,16 +68,16 @@ export const FaceCaptureSection = ({
               />
               {!isCameraReady ? (
                 <div className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground">
-                  Camera is not running yet
+                  กล้องยังไม่พร้อมใช้งาน
                 </div>
               ) : null}
             </div>
             <div className="flex flex-wrap gap-3">
               <Button onClick={onInitializeCamera} disabled={isProcessing} variant="outline">
-                {isCameraReady ? "Restart camera" : "Start camera"}
+                {isCameraReady ? "เริ่มกล้องใหม่" : "เริ่มกล้อง"}
               </Button>
               <Button onClick={onCapture} disabled={!isCameraReady || isProcessing}>
-                {isProcessing ? "Processing" : "Capture & verify"}
+                {isProcessing ? "กำลังประมวลผล" : "ถ่ายภาพและตรวจสอบ"}
               </Button>
             </div>
           </div>

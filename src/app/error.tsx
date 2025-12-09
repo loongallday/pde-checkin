@@ -20,12 +20,12 @@ export default function GlobalError({
       <body className="min-h-screen bg-background px-6 py-12">
         <div className="mx-auto max-w-xl">
           <Alert variant="destructive" className="mb-6">
-            <AlertTitle>Something went wrong</AlertTitle>
+            <AlertTitle>เกิดข้อผิดพลาด</AlertTitle>
             <AlertDescription>
-              {error.message || "An unexpected error occurred. Please try again."}
+              {error.message || "เกิดข้อผิดพลาดที่ไม่คาดคิด กรุณาลองอีกครั้ง"}
             </AlertDescription>
           </Alert>
-          <Button onClick={reset}>Try again</Button>
+          <Button onClick={reset}>ลองอีกครั้ง</Button>
         </div>
       </body>
     </html>

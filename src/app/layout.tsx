@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Face Recognition Check-in",
-  description: "In-office employee attendance powered by face verification.",
+  title: "ระบบเช็คชื่อด้วยใบหน้า",
+  description: "ระบบบันทึกการเข้างานของพนักงานด้วยการยืนยันตัวตนด้วยใบหน้า",
 };
 
 export default function RootLayout({
@@ -23,7 +23,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
+    <html lang="th">
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
