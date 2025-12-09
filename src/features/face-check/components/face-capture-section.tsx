@@ -29,11 +29,8 @@ export const phaseLabel: Record<FaceCheckPhase, string> = {
   "camera-initializing": "กำลังเตรียมกล้อง",
   "camera-ready": "พร้อมตรวจจับ",
   detecting: "🔍 กำลังสแกน...",
-  capturing: "กำลังถ่ายภาพ",
-  verifying: "กำลังตรวจสอบ",
   matched: "✓ พบตรงกัน!",
   cooldown: "⏳ รอสักครู่...",
-  "multi-capture": "📸 ถ่ายหลายมุม",
   error: "ข้อผิดพลาด",
 };
 
@@ -52,7 +49,7 @@ export const FaceCaptureSection = ({
   const overlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const isCameraReady = phase === "camera-ready" || phase === "matched" || phase === "cooldown" || phase === "detecting";
-  const isProcessing = phase === "camera-initializing" || phase === "capturing" || phase === "verifying" || phase === "loading-models" || phase === "loading-employees";
+  const isProcessing = phase === "camera-initializing" || phase === "loading-models" || phase === "loading-employees";
 
   // Draw face bounding boxes on overlay canvas
   const drawFaceOverlay = useCallback(() => {
