@@ -9,8 +9,8 @@ interface LivenessFrame {
 }
 
 const FRAME_HISTORY_SIZE = 6;
-const MIN_FRAMES_FOR_LIVENESS = 2; // Very fast liveness check
-const MOVEMENT_THRESHOLD = 1; // Very sensitive to movement
+const MIN_FRAMES_FOR_LIVENESS = 3; // Balanced liveness check
+const MOVEMENT_THRESHOLD = 1.5; // Balanced movement sensitivity
 const BLINK_THRESHOLD = 0.2; // Eye aspect ratio threshold for blink detection
 
 /**

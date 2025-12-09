@@ -70,9 +70,10 @@ interface UseFaceCheckViewModelOptions {
   autoStart?: boolean; // Auto-start camera and detection
 }
 
-const DETECTION_INTERVAL_MS = 150; // Very fast detection (6+ per second)
+const DETECTION_INTERVAL_MS = 250; // Balanced detection speed (4 per second)
 const CHECK_IN_COOLDOWN_MS = 300; // 0.3 second cooldown - instant transition
 const SAME_PERSON_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour cooldown for same person
+const STUCK_TIMEOUT_MS = 10000; // 10 seconds timeout for stuck state recovery
 
 interface EmployeeMatch {
   employee: Employee;
@@ -118,6 +119,8 @@ export const useFaceCheckViewModel = ({
   const cooldownTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const recentCheckIns = useRef<Map<string, number>>(new Map()); // employeeId -> timestamp
   const initStartedRef = useRef(false);
+  const isDetectionRunningRef = useRef(false); // Proper loop control flag
+  const lastSuccessfulActionRef = useRef(Date.now()); // For stuck state detection
 
   useEffect(() => {
     setIsCameraSupported(Boolean(navigator?.mediaDevices?.getUserMedia));
@@ -125,6 +128,7 @@ export const useFaceCheckViewModel = ({
 
   // Stop detection
   const stopDetection = useCallback(() => {
+    isDetectionRunningRef.current = false; // Signal loop to stop
     if (detectionIntervalRef.current) {
       clearTimeout(detectionIntervalRef.current);
       detectionIntervalRef.current = null;
@@ -312,15 +316,17 @@ export const useFaceCheckViewModel = ({
       // Restart detection with self-scheduling pattern
       if (streamRef.current && videoRef.current && autoDetectAndCheckInRef.current) {
         setIsDetecting(true);
+        isDetectionRunningRef.current = true; // Signal loop to run
         
         const scheduleNextDetection = () => {
-          if (!streamRef.current || !videoRef.current) return;
+          if (!isDetectionRunningRef.current || !streamRef.current || !videoRef.current) return;
           
           detectionIntervalRef.current = setTimeout(async () => {
+            if (!isDetectionRunningRef.current) return; // Exit if stopped
             try {
               await autoDetectAndCheckInRef.current?.();
             } finally {
-              if (detectionIntervalRef.current !== null) {
+              if (isDetectionRunningRef.current) {
                 scheduleNextDetection();
               }
             }
@@ -329,7 +335,9 @@ export const useFaceCheckViewModel = ({
         
         // Start the detection loop
         void autoDetectAndCheckInRef.current().then(() => {
-          scheduleNextDetection();
+          if (isDetectionRunningRef.current) {
+            scheduleNextDetection();
+          }
         });
       }
     }, CHECK_IN_COOLDOWN_MS);
@@ -342,6 +350,27 @@ export const useFaceCheckViewModel = ({
     setConsecutiveMatchCount(0);
     setLastMatchedEmployeeId(null);
   }, []);
+
+  // Watchdog timer to recover from stuck states
+  useEffect(() => {
+    if (!isDetecting) return;
+
+    const watchdog = setInterval(() => {
+      const timeSinceLastAction = Date.now() - lastSuccessfulActionRef.current;
+      if (timeSinceLastAction > STUCK_TIMEOUT_MS) {
+        console.warn(`Detection stuck for ${timeSinceLastAction}ms, resetting...`);
+        resetLivenessDetector();
+        consecutiveMatchCountRef.current = 0;
+        lastMatchedEmployeeIdRef.current = null;
+        setConsecutiveMatchCount(0);
+        setLastMatchedEmployeeId(null);
+        setMatchInCooldown(false);
+        lastSuccessfulActionRef.current = Date.now();
+      }
+    }, 5000); // Check every 5 seconds
+
+    return () => clearInterval(watchdog);
+  }, [isDetecting]);
 
   // Auto-detect and auto check-in with multi-frame confirmation
   const autoDetectAndCheckIn = useCallback(async (): Promise<boolean> => {
@@ -357,8 +386,12 @@ export const useFaceCheckViewModel = ({
         setDetectedFaces([]);
         setLivenessScore(0);
         resetConsecutiveMatch();
+        resetLivenessDetector(); // Reset liveness when face is lost
         return false;
       }
+
+      // Face detected - update watchdog timestamp
+      lastSuccessfulActionRef.current = Date.now();
 
       // Quality gate: skip low-quality frames during check-in
       if (capture.quality && capture.quality.score < ACCURACY_CONFIG.MIN_QUALITY_FOR_CHECKIN) {
@@ -537,18 +570,21 @@ export const useFaceCheckViewModel = ({
     setDetectedEmployee(null);
     setMatchResult(null);
     resetLivenessDetector();
+    isDetectionRunningRef.current = true; // Signal loop to run
 
     // Use self-scheduling pattern to prevent overlapping detection calls
     // This avoids the Chrome "setInterval handler took Xms" violation
     const scheduleNextDetection = () => {
-      if (!streamRef.current || !videoRef.current) return;
+      // Check the running flag instead of just refs
+      if (!isDetectionRunningRef.current || !streamRef.current || !videoRef.current) return;
       
       detectionIntervalRef.current = setTimeout(async () => {
+        if (!isDetectionRunningRef.current) return; // Exit if stopped
         try {
           await autoDetectAndCheckIn();
         } finally {
-          // Schedule next detection only after current one completes
-          if (detectionIntervalRef.current !== null) {
+          // Schedule next detection only if still running
+          if (isDetectionRunningRef.current) {
             scheduleNextDetection();
           }
         }
@@ -557,7 +593,9 @@ export const useFaceCheckViewModel = ({
 
     // Run first detection immediately, then start the loop
     void autoDetectAndCheckIn().then(() => {
-      scheduleNextDetection();
+      if (isDetectionRunningRef.current) {
+        scheduleNextDetection();
+      }
     });
   }, [employees, autoDetectAndCheckIn]);
 
