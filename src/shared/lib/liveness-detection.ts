@@ -8,9 +8,9 @@ interface LivenessFrame {
   faceBox?: { x: number; y: number; width: number; height: number };
 }
 
-const FRAME_HISTORY_SIZE = 10;
-const MIN_FRAMES_FOR_LIVENESS = 5;
-const MOVEMENT_THRESHOLD = 2; // Minimum pixel movement to count as "alive"
+const FRAME_HISTORY_SIZE = 6;
+const MIN_FRAMES_FOR_LIVENESS = 2; // Very fast liveness check
+const MOVEMENT_THRESHOLD = 1; // Very sensitive to movement
 const BLINK_THRESHOLD = 0.2; // Eye aspect ratio threshold for blink detection
 
 /**

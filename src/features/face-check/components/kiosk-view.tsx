@@ -6,7 +6,7 @@ import { cn } from "@/lib/utils";
 import { toast } from "@/components/ui/sonner";
 import type { FaceMatchResult, Employee } from "@/entities/employee";
 import type { FaceCheckPhase, CheckInLogEntry } from "../hooks/use-face-check-view-model";
-import type { DetectedFace } from "@/shared/lib/face-embedding";
+import { ACCURACY_CONFIG, type DetectedFace } from "@/shared/lib/face-embedding";
 
 interface KioskViewProps {
   employees: Employee[];
@@ -18,6 +18,8 @@ interface KioskViewProps {
     isDetecting: boolean;
     modelsReady: boolean;
     livenessScore: number;
+    consecutiveMatchCount: number;
+    matchInCooldown: boolean;
   };
   videoRef: RefObject<HTMLVideoElement | null>;
   matchResult: FaceMatchResult | null;
@@ -238,15 +240,62 @@ export const KioskView = ({
   }, [status.isDetecting, drawFaceOverlay]);
 
   const getStatusMessage = () => {
-    if (!status.modelsReady) return { text: "กำลังโหลดระบบ...", color: "text-yellow-400" };
-    if (status.phase === "loading-employees") return { text: "กำลังโหลดข้อมูล...", color: "text-yellow-400" };
-    if (status.phase === "camera-initializing") return { text: "กำลังเปิดกล้อง...", color: "text-yellow-400" };
-    if (status.phase === "cooldown") return { text: "สแกนสำเร็จ!", color: "text-green-400" };
-    if (status.phase === "matched") return { text: "ยินดีต้อนรับ!", color: "text-green-400" };
-    if (error) return { text: error, color: "text-red-400" };
-    if (status.isDetecting && detectedFaces.length > 0) return { text: "กำลังยืนยันตัวตน...", color: "text-blue-400" };
-    if (status.isDetecting) return { text: "กรุณาหันหน้าเข้าหากล้อง", color: "text-white" };
-    return { text: "พร้อมสแกน", color: "text-white" };
+    if (!status.modelsReady) return { text: "กำลังโหลดระบบ...", color: "text-yellow-400", hint: null };
+    if (status.phase === "loading-employees") return { text: "กำลังโหลดข้อมูล...", color: "text-yellow-400", hint: null };
+    if (status.phase === "camera-initializing") return { text: "กำลังเปิดกล้อง...", color: "text-yellow-400", hint: null };
+    if (status.phase === "cooldown") return { text: "สแกนสำเร็จ!", color: "text-green-400", hint: null };
+    if (status.phase === "matched") return { text: "ยินดีต้อนรับ!", color: "text-green-400", hint: null };
+    if (error) return { text: error, color: "text-red-400", hint: null };
+    
+    // When detecting with face visible
+    if (status.isDetecting && detectedFaces.length > 0) {
+      // Check if we have a potential match (name shown)
+      const hasMatch = detectedFaces.some(f => f.employeeName);
+      
+      if (hasMatch) {
+        // Person already checked in today (1 hour cooldown)
+        if (status.matchInCooldown) {
+          return { 
+            text: "✅ เช็คอินแล้ว", 
+            color: "text-green-400",
+            hint: "คุณได้เช็คอินแล้ววันนี้"
+          };
+        }
+        // Face matched but liveness not confirmed yet
+        if (status.livenessScore < 0.3) {
+          return { 
+            text: "กำลังยืนยันตัวตน...", 
+            color: "text-blue-400",
+            hint: "💡 ขยับหน้าเล็กน้อย หรือกระพริบตา"
+          };
+        }
+        // Liveness passed, waiting for consecutive matches
+        const matchProgress = status.consecutiveMatchCount;
+        const required = ACCURACY_CONFIG.CONSECUTIVE_MATCHES_REQUIRED;
+        if (matchProgress > 0 && matchProgress < required) {
+          return { 
+            text: `กำลังยืนยัน... (${matchProgress}/${required})`, 
+            color: "text-blue-400",
+            hint: "✨ อยู่นิ่งๆ อีกสักครู่..."
+          };
+        }
+        return { 
+          text: "กำลังประมวลผล...", 
+          color: "text-blue-400",
+          hint: "🔄 อยู่นิ่งๆ หน้ากล้อง"
+        };
+      }
+      
+      // Face detected but no match
+      return { 
+        text: "ไม่พบข้อมูลใบหน้า", 
+        color: "text-yellow-400",
+        hint: "กรุณาลงทะเบียนใบหน้าก่อน"
+      };
+    }
+    
+    if (status.isDetecting) return { text: "กรุณาหันหน้าเข้าหากล้อง", color: "text-white", hint: null };
+    return { text: "พร้อมสแกน", color: "text-white", hint: null };
   };
 
   const statusMessage = getStatusMessage();
@@ -305,19 +354,49 @@ export const KioskView = ({
               {statusMessage.text}
             </p>
             
-            {/* Liveness indicator */}
+            {/* Hint message */}
+            {statusMessage.hint && (
+              <p className="mt-2 text-lg text-white/70 animate-pulse">
+                {statusMessage.hint}
+              </p>
+            )}
+            
+            {/* Liveness and match progress indicators */}
             {status.isDetecting && detectedFaces.length > 0 && (
-              <div className="mt-4 flex items-center justify-center gap-3">
-                <span className="text-white/60 text-sm">ความปลอดภัย</span>
-                <div className="w-32 h-2 bg-white/20 rounded-full overflow-hidden">
-                  <div 
-                    className={cn(
-                      "h-full rounded-full transition-all duration-300",
-                      status.livenessScore >= 0.5 ? "bg-green-400" : "bg-yellow-400"
-                    )}
-                    style={{ width: `${status.livenessScore * 100}%` }}
-                  />
+              <div className="mt-4 space-y-3">
+                {/* Liveness indicator */}
+                <div className="flex items-center justify-center gap-3">
+                  <span className="text-white/60 text-sm w-24 text-right">
+                    {status.livenessScore >= 0.3 ? "✓ ตัวตน" : "ตรวจตัวตน"}
+                  </span>
+                  <div className="w-32 h-2 bg-white/20 rounded-full overflow-hidden">
+                    <div 
+                      className={cn(
+                        "h-full rounded-full transition-all duration-300",
+                        status.livenessScore >= 0.3 ? "bg-green-400" : "bg-yellow-400"
+                      )}
+                      style={{ width: `${Math.min(status.livenessScore * 100 * 3, 100)}%` }}
+                    />
+                  </div>
                 </div>
+                
+                {/* Match progress indicator - only show when liveness passed */}
+                {status.livenessScore >= 0.3 && detectedFaces.some(f => f.employeeName) && (
+                  <div className="flex items-center justify-center gap-3">
+                    <span className="text-white/60 text-sm w-24 text-right">
+                      {status.consecutiveMatchCount >= ACCURACY_CONFIG.CONSECUTIVE_MATCHES_REQUIRED ? "✓ ยืนยัน" : "การยืนยัน"}
+                    </span>
+                    <div className="w-32 h-2 bg-white/20 rounded-full overflow-hidden">
+                      <div 
+                        className={cn(
+                          "h-full rounded-full transition-all duration-300",
+                          status.consecutiveMatchCount >= ACCURACY_CONFIG.CONSECUTIVE_MATCHES_REQUIRED ? "bg-green-400" : "bg-blue-400"
+                        )}
+                        style={{ width: `${(status.consecutiveMatchCount / ACCURACY_CONFIG.CONSECUTIVE_MATCHES_REQUIRED) * 100}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -345,39 +424,6 @@ export const KioskView = ({
                   ความแม่นยำ {Math.round(matchResult.score * 100)}%
                 </p>
               )}
-            </div>
-          </div>
-        )}
-
-        {/* Recent check-ins sidebar */}
-        {checkInLogs.length > 0 && status.phase !== "matched" && status.phase !== "cooldown" && (
-          <div className="absolute right-6 top-1/2 -translate-y-1/2 w-72">
-            <div className="bg-black/40 backdrop-blur-md rounded-2xl p-4">
-              <h3 className="text-white/60 text-sm font-medium mb-3 px-2">เช็คชื่อล่าสุด</h3>
-              <div className="space-y-2 max-h-80 overflow-y-auto">
-                {checkInLogs.slice(0, 5).map((log) => (
-                  <div
-                    key={log.id}
-                    className="flex items-center gap-3 p-3 rounded-xl bg-white/5 hover:bg-white/10 transition-colors"
-                  >
-                    <div className="w-10 h-10 rounded-full bg-gradient-to-br from-blue-500 to-purple-500 flex items-center justify-center text-white font-medium">
-                      {log.employeeName.slice(0, 2).toUpperCase()}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-white text-sm font-medium truncate">{log.employeeName}</p>
-                      <p className="text-white/50 text-xs">
-                        {log.timestamp.toLocaleTimeString("th-TH", {
-                          hour: "2-digit",
-                          minute: "2-digit",
-                        })}
-                      </p>
-                    </div>
-                    <div className="text-green-400 text-xs font-medium">
-                      {Math.round(log.similarity * 100)}%
-                    </div>
-                  </div>
-                ))}
-              </div>
             </div>
           </div>
         )}

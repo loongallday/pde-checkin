@@ -75,6 +75,14 @@ export const areModelsLoaded = (): boolean => modelsLoaded;
  */
 export const getModelLoadError = (): string | null => modelLoadError;
 
+// Detection confidence thresholds
+export const DETECTION_CONFIG = {
+  // Minimum confidence for face detection (increased from 0.5 to 0.7 to reduce false accepts)
+  MIN_CONFIDENCE: 0.7,
+  // Fast detector threshold (slightly lower for responsiveness)
+  FAST_DETECTOR_THRESHOLD: 0.6,
+};
+
 /**
  * Detect faces in a video element using SSD MobileNet (more accurate)
  */
@@ -89,7 +97,7 @@ export const detectFaces = async (
   try {
     // Use SSD MobileNet with landmarks and descriptors
     const detections = await faceapi
-      .detectAllFaces(video, new faceapi.SsdMobilenetv1Options({ minConfidence: 0.5 }))
+      .detectAllFaces(video, new faceapi.SsdMobilenetv1Options({ minConfidence: DETECTION_CONFIG.MIN_CONFIDENCE }))
       .withFaceLandmarks()
       .withFaceDescriptors();
 
@@ -124,7 +132,7 @@ export const detectFacesFast = async (
   try {
     const detections = await faceapi.detectAllFaces(
       video,
-      new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.5 })
+      new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: DETECTION_CONFIG.FAST_DETECTOR_THRESHOLD })
     );
 
     return detections.map((detection) => ({
@@ -146,16 +154,19 @@ export const detectFacesFast = async (
  * Detect single face with full descriptor (for enrollment/matching)
  */
 export const detectSingleFaceWithDescriptor = async (
-  input: HTMLVideoElement | HTMLCanvasElement | HTMLImageElement
+  input: HTMLVideoElement | HTMLCanvasElement | HTMLImageElement,
+  options?: { minConfidence?: number }
 ): Promise<DetectionResult | null> => {
   if (!modelsLoaded) {
     const loaded = await loadFaceDetectionModels();
     if (!loaded) return null;
   }
 
+  const minConfidence = options?.minConfidence ?? DETECTION_CONFIG.MIN_CONFIDENCE;
+
   try {
     const detection = await faceapi
-      .detectSingleFace(input, new faceapi.SsdMobilenetv1Options({ minConfidence: 0.5 }))
+      .detectSingleFace(input, new faceapi.SsdMobilenetv1Options({ minConfidence }))
       .withFaceLandmarks()
       .withFaceDescriptor();
 
