@@ -22,7 +22,7 @@ import {
   type DetectedFace,
   type FaceQualityResult,
 } from "@/shared/lib/face-embedding";
-import { detectSingleFaceWithDescriptor, DETECTION_CONFIG } from "@/shared/lib/face-detection-service";
+import { DETECTION_CONFIG } from "@/shared/lib/face-detection-service";
 import { getLivenessDetector, resetLivenessDetector } from "@/shared/lib/liveness-detection";
 import type { EmployeeRepository } from "@/shared/repositories/employee-repository";
 
@@ -61,9 +61,9 @@ export interface MultiAngleCaptureState {
 }
 
 // Required angles for multi-angle enrollment
-export const REQUIRED_ANGLES: FaceAngle[] = ["front", "slight-left", "slight-right"];
-export const OPTIONAL_ANGLES: FaceAngle[] = ["left", "right"];
-export const MIN_REQUIRED_CAPTURES = 3;
+export const REQUIRED_ANGLES: FaceAngle[] = ["front", "slight-left", "slight-right", "left", "right"];
+export const OPTIONAL_ANGLES: FaceAngle[] = [];
+export const MIN_REQUIRED_CAPTURES = 5;
 
 interface UseFaceCheckViewModelOptions {
   repository: EmployeeRepository;
@@ -121,6 +121,8 @@ export const useFaceCheckViewModel = ({
   const initStartedRef = useRef(false);
   const isDetectionRunningRef = useRef(false); // Proper loop control flag
   const lastSuccessfulActionRef = useRef(Date.now()); // For stuck state detection
+  const qualityMonitoringRef = useRef<NodeJS.Timeout | null>(null);
+  const phaseRef = useRef<FaceCheckPhase>(phase);
 
   useEffect(() => {
     setIsCameraSupported(Boolean(navigator?.mediaDevices?.getUserMedia));
@@ -619,13 +621,27 @@ export const useFaceCheckViewModel = ({
     if (!navigator?.mediaDevices?.getUserMedia) {
       setError("อุปกรณ์นี้ไม่รองรับกล้อง");
       setPhase("error");
-      return;
+      return false;
+    }
+
+    // Prevent re-initialization if camera is already active
+    if (streamRef.current && videoRef.current && videoRef.current.srcObject === streamRef.current) {
+      // Camera already initialized and connected
+      if (videoRef.current.readyState >= 2) { // HAVE_CURRENT_DATA or higher
+        setPhase("camera-ready");
+        return true;
+      }
     }
 
     setPhase("camera-initializing");
     setError(null);
 
     try {
+      // Stop existing stream if any
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((track) => track.stop());
+      }
+
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: "user",
@@ -639,7 +655,25 @@ export const useFaceCheckViewModel = ({
       });
 
       if (videoRef.current) {
-        videoRef.current.srcObject = stream;
+        // Set srcObject before play to prevent blinking
+        const currentSrc = videoRef.current.srcObject;
+        if (currentSrc !== stream) {
+          videoRef.current.srcObject = stream;
+        }
+        
+        // Wait for video to be ready before playing
+        if (videoRef.current.readyState < 2) {
+          await new Promise((resolve) => {
+            const onLoadedMetadata = () => {
+              videoRef.current?.removeEventListener("loadedmetadata", onLoadedMetadata);
+              resolve(undefined);
+            };
+            videoRef.current?.addEventListener("loadedmetadata", onLoadedMetadata);
+            // Fallback timeout
+            setTimeout(resolve, 1000);
+          });
+        }
+        
         await videoRef.current.play();
       }
 
@@ -842,8 +876,121 @@ export const useFaceCheckViewModel = ({
     }
   }, []);
 
+  // Monitor quality during multi-capture (for live feedback)
+  const monitorQualityForMultiCapture = useCallback(async (): Promise<void> => {
+    console.log("[QualityMonitor] Starting quality check", {
+      hasVideo: !!videoRef.current,
+      phase: phaseRef.current,
+      videoReady: videoRef.current?.readyState,
+      videoWidth: videoRef.current?.videoWidth,
+      videoHeight: videoRef.current?.videoHeight,
+    });
+
+    if (!videoRef.current || phaseRef.current !== "multi-capture") {
+      console.log("[QualityMonitor] Skipping - no video or wrong phase");
+      return;
+    }
+
+    try {
+      console.log("[QualityMonitor] Calling captureEmbeddingFromVideoAsync...");
+      const startTime = performance.now();
+      const capture = await captureEmbeddingFromVideoAsync(videoRef.current, { validateQuality: true });
+      const duration = performance.now() - startTime;
+      console.log("[QualityMonitor] Capture completed", {
+        duration: `${duration.toFixed(2)}ms`,
+        faceDetected: capture.faceDetected,
+        hasQuality: !!capture.quality,
+        qualityValid: capture.quality?.isValid,
+        qualityScore: capture.quality?.score,
+        estimatedAngle: capture.estimatedAngle,
+      });
+      
+      if (capture.faceDetected && capture.quality) {
+        console.log("[QualityMonitor] Setting quality:", {
+          isValid: capture.quality.isValid,
+          score: capture.quality.score,
+          angle: capture.quality.details.faceAngle,
+          estimatedAngle: capture.estimatedAngle,
+        });
+        setLastQuality(capture.quality);
+      } else {
+        console.log("[QualityMonitor] No face or quality - setting null", {
+          faceDetected: capture.faceDetected,
+          hasQuality: !!capture.quality,
+        });
+        setLastQuality(null);
+      }
+    } catch (error) {
+      console.error("[QualityMonitor] Error during quality check:", error);
+      setLastQuality(null);
+    }
+  }, []);
+
+  // Start continuous quality monitoring for multi-capture
+  const startQualityMonitoring = useCallback(() => {
+    console.log("[QualityMonitor] Starting quality monitoring", {
+      phaseRef: phaseRef.current,
+      hasVideo: !!videoRef.current,
+      videoReady: videoRef.current?.readyState,
+    });
+    
+    // Stop existing monitoring
+    if (qualityMonitoringRef.current) {
+      console.log("[QualityMonitor] Clearing existing monitoring");
+      clearTimeout(qualityMonitoringRef.current);
+    }
+    
+    // Check phase - if not ready, retry after a short delay
+    if (phaseRef.current !== "multi-capture") {
+      console.log("[QualityMonitor] Not in multi-capture phase yet, will retry", {
+        currentPhase: phaseRef.current,
+      });
+      // Retry after state has time to update
+      setTimeout(() => {
+        if (phaseRef.current === "multi-capture") {
+          console.log("[QualityMonitor] Phase updated, starting now");
+          startQualityMonitoring();
+        } else {
+          console.warn("[QualityMonitor] Still not in multi-capture phase after retry");
+        }
+      }, 200);
+      return;
+    }
+    
+    const monitorLoop = () => {
+      console.log("[QualityMonitor] Monitor loop iteration", {
+        phase: phaseRef.current,
+        hasVideo: !!videoRef.current,
+      });
+      
+      if (phaseRef.current !== "multi-capture" || !videoRef.current) {
+        console.log("[QualityMonitor] Stopping monitor loop");
+        qualityMonitoringRef.current = null;
+        return;
+      }
+      void monitorQualityForMultiCapture().then(() => {
+        if (phaseRef.current === "multi-capture") {
+          console.log("[QualityMonitor] Scheduling next check in 500ms");
+          qualityMonitoringRef.current = setTimeout(monitorLoop, 500); // Check every 500ms
+        } else {
+          console.log("[QualityMonitor] Phase changed, stopping");
+          qualityMonitoringRef.current = null;
+        }
+      }).catch((error) => {
+        console.error("[QualityMonitor] Error in monitor loop:", error);
+        if (phaseRef.current === "multi-capture") {
+          qualityMonitoringRef.current = setTimeout(monitorLoop, 500);
+        }
+      });
+    };
+    
+    console.log("[QualityMonitor] Starting monitor loop");
+    monitorLoop();
+  }, [monitorQualityForMultiCapture]);
+
   // Start multi-angle capture session
   const startMultiAngleCapture = useCallback(() => {
+    console.log("[MultiCapture] Starting multi-angle capture");
     setMultiAngleState({
       targetAngles: [...REQUIRED_ANGLES],
       capturedEntries: [],
@@ -851,9 +998,17 @@ export const useFaceCheckViewModel = ({
       currentAngleIndex: 0,
       qualityIssues: [],
     });
+    // Update phase and ref immediately
+    phaseRef.current = "multi-capture";
     setPhase("multi-capture");
     setError(null);
-  }, []);
+    // Start quality monitoring after a short delay to ensure state is set
+    console.log("[MultiCapture] Scheduling quality monitoring start");
+    setTimeout(() => {
+      console.log("[MultiCapture] Starting quality monitoring now, phase:", phaseRef.current);
+      startQualityMonitoring();
+    }, 100);
+  }, [startQualityMonitoring]);
 
   // Get guidance text for current angle
   const getAngleGuidance = useCallback((angle: FaceAngle): string => {
@@ -900,7 +1055,9 @@ export const useFaceCheckViewModel = ({
         (currentAngle === "front" && detectedAngle === "slight-left") ||
         (currentAngle === "front" && detectedAngle === "slight-right") ||
         (currentAngle === "slight-left" && detectedAngle === "left") ||
-        (currentAngle === "slight-right" && detectedAngle === "right");
+        (currentAngle === "slight-right" && detectedAngle === "right") ||
+        (currentAngle === "left" && (detectedAngle === "slight-left" || detectedAngle === "left")) ||
+        (currentAngle === "right" && (detectedAngle === "slight-right" || detectedAngle === "right"));
 
       if (!angleMatches) {
         return { 
@@ -930,7 +1087,13 @@ export const useFaceCheckViewModel = ({
         currentAngleIndex: newIndex,
       });
 
-      setLastQuality(capture.quality ?? null);
+      // Clear last quality to force fresh check for next angle
+      // Quality monitoring will update it shortly (within 500ms)
+      console.log("[MultiCapture] Clearing quality for next angle", {
+        currentIndex: newIndex,
+        nextAngle: multiAngleState.targetAngles[newIndex],
+      });
+      setLastQuality(null);
       setSnapshot(capture.dataUrl);
 
       if (isComplete) {
@@ -948,6 +1111,11 @@ export const useFaceCheckViewModel = ({
 
   // Cancel multi-angle capture
   const cancelMultiAngleCapture = useCallback(() => {
+    // Stop quality monitoring
+    if (qualityMonitoringRef.current) {
+      clearTimeout(qualityMonitoringRef.current);
+      qualityMonitoringRef.current = null;
+    }
     setMultiAngleState(null);
     setPhase("camera-ready");
     setError(null);

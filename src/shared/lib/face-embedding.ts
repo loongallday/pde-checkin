@@ -1,14 +1,18 @@
-import * as faceapi from "face-api.js";
 import {
-  detectSingleFaceWithDescriptor,
-  detectFacesFast,
-  loadFaceDetectionModels,
-  areModelsLoaded,
-  compareFaceDescriptors,
-  descriptorToArray,
+  detectFacesWithMediaPipe,
+  detectSingleFaceWithMediaPipe,
+  loadMediaPipeModels,
+  areMediaPipeModelsLoaded,
+  estimateHeadPose,
+  type MediaPipeLandmark,
   type DetectionResult,
-  type FaceBox,
-} from "./face-detection-service";
+} from "./mediapipe-face-detection";
+import {
+  loadFaceRecognitionModel,
+  isFaceRecognitionModelLoaded,
+  generateEmbeddingFromLandmarks,
+  compareEmbeddings,
+} from "./tensorflow-face-recognition";
 import type { FaceAngle, FaceEmbeddings, FaceEmbeddingEntry } from "@/entities/employee";
 
 export interface FaceBoundingBox {
@@ -37,7 +41,7 @@ export const QUALITY_THRESHOLDS = {
   MIN_CONFIDENCE: 0.7, // Minimum detection confidence
   MIN_BRIGHTNESS: 0.2, // Minimum brightness (0-1)
   MAX_BRIGHTNESS: 0.9, // Maximum brightness (0-1)
-  MAX_FACE_ANGLE: 45, // Maximum degrees from frontal
+  MAX_FACE_ANGLE: 30, // Maximum degrees from frontal (more lenient for enrollment)
 };
 
 export interface FrameCaptureResult {
@@ -46,7 +50,7 @@ export interface FrameCaptureResult {
   faceDetected: boolean;
   boundingBox?: FaceBoundingBox;
   confidence?: number;
-  landmarks?: faceapi.FaceLandmarks68;
+  landmarks?: MediaPipeLandmark[]; // MediaPipe 3D landmarks
   quality?: FaceQualityResult; // Quality assessment
   estimatedAngle?: FaceAngle; // Estimated face angle
 }
@@ -98,17 +102,24 @@ const createWorkingCanvas = (width: number, height: number) => {
 };
 
 /**
- * Initialize face detection models
+ * Initialize face detection models (MediaPipe + TensorFlow.js)
  * Call this early in app lifecycle for faster first detection
  */
 export const initializeFaceDetection = async (): Promise<boolean> => {
-  return loadFaceDetectionModels();
+  // Load MediaPipe (for detection/liveness) and TensorFlow.js (for embeddings)
+  const [mediaPipeLoaded, tfLoaded] = await Promise.all([
+    loadMediaPipeModels(),
+    loadFaceRecognitionModel(),
+  ]);
+  return mediaPipeLoaded && tfLoaded;
 };
 
 /**
  * Check if face detection is ready
  */
-export const isFaceDetectionReady = (): boolean => areModelsLoaded();
+export const isFaceDetectionReady = (): boolean => {
+  return areMediaPipeModelsLoaded() && isFaceRecognitionModelLoaded();
+};
 
 /**
  * Capture frame and detect face with AI-powered detection
@@ -127,27 +138,41 @@ export const captureEmbeddingFromVideoAsync = async (
   const height = video.videoHeight || 640;
 
   // Create canvas for snapshot
+  // Flip horizontally to match what user sees (camera is mirrored)
   const { canvas, context } = createWorkingCanvas(width, height);
-  context.drawImage(video, 0, 0, width, height);
+  context.save();
+  context.scale(-1, 1); // Flip horizontally
+  context.drawImage(video, -width, 0, width, height);
+  context.restore();
   const dataUrl = canvas.toDataURL("image/jpeg", jpegQuality);
 
-  // Detect face using face-api.js
-  const detection = await detectSingleFaceWithDescriptor(video);
+  // Detect face using MediaPipe
+  console.log("[FaceEmbedding] Starting MediaPipe detection...");
+  const detectionStartTime = performance.now();
+  const detection = await detectSingleFaceWithMediaPipe(video);
+  const detectionDuration = performance.now() - detectionStartTime;
+  console.log("[FaceEmbedding] MediaPipe detection completed", {
+    duration: `${detectionDuration.toFixed(2)}ms`,
+    detected: !!detection,
+    landmarksCount: detection?.landmarks?.length || 0,
+  });
 
-  if (detection && detection.descriptor) {
+  if (detection && detection.landmarks && detection.landmarks.length >= 468) {
+    // Generate embedding from MediaPipe landmarks using TensorFlow.js
+    const embedding = await generateEmbeddingFromLandmarks(detection.landmarks);
+    
     // Validate quality if requested
     const quality = validateQuality 
-      ? validateFaceQuality(detection, context, width, height)
+      ? validateFaceQualityFromMediaPipe(detection, context, width, height)
       : undefined;
     
-    // Estimate face angle if landmarks available
-    const estimatedAngle = detection.landmarks 
-      ? estimateFaceAngleCategory(detection.landmarks)
-      : undefined;
+    // Estimate face angle from MediaPipe landmarks
+    const headPose = estimateHeadPose(detection.landmarks);
+    const estimatedAngle = estimateFaceAngleCategoryFromPose(headPose);
     
     return {
       dataUrl,
-      embedding: descriptorToArray(detection.descriptor),
+      embedding,
       faceDetected: true,
       boundingBox: detection.box,
       confidence: detection.score,
@@ -201,7 +226,7 @@ export const detectFacesInVideo = async (
 ): Promise<FaceBoundingBox[]> => {
   if (!video || video.readyState < 2) return [];
 
-  const detections = await detectFacesFast(video);
+  const detections = await detectFacesWithMediaPipe(video);
   return detections.map((d) => d.box);
 };
 
@@ -212,7 +237,7 @@ export const detectFacesWithDetails = async (
   video: HTMLVideoElement
 ): Promise<DetectionResult[]> => {
   if (!video || video.readyState < 2) return [];
-  return detectFacesFast(video);
+  return detectFacesWithMediaPipe(video);
 };
 
 /**
@@ -225,10 +250,7 @@ export const compareFaces = (
 ): number => {
   if (embedding1.length === 0 || embedding2.length === 0) return Infinity;
   
-  const d1 = embedding1 instanceof Float32Array ? embedding1 : new Float32Array(embedding1);
-  const d2 = embedding2 instanceof Float32Array ? embedding2 : new Float32Array(embedding2);
-  
-  return compareFaceDescriptors(d1, d2);
+  return compareEmbeddings(embedding1, embedding2);
 };
 
 /**
@@ -260,47 +282,22 @@ export const similarityToDistance = (similarity: number): number => {
 };
 
 /**
- * Estimate face angle from landmarks
+ * Estimate face angle from MediaPipe landmarks
  * Returns pitch, yaw, roll in degrees
  */
 export const estimateFaceAngle = (
-  landmarks: faceapi.FaceLandmarks68
+  landmarks: MediaPipeLandmark[]
 ): { pitch: number; yaw: number; roll: number } => {
-  const positions = landmarks.positions;
-  
-  // Get key facial points
-  const nose = positions[30]; // Nose tip
-  const leftEye = positions[36]; // Left eye outer corner
-  const rightEye = positions[45]; // Right eye outer corner
-  const chin = positions[8]; // Chin
-  const foreheadApprox = { x: (positions[19].x + positions[24].x) / 2, y: (positions[19].y + positions[24].y) / 2 };
-  
-  // Calculate yaw (left-right rotation) using nose position relative to eye centers
-  const eyeCenter = { x: (leftEye.x + rightEye.x) / 2, y: (leftEye.y + rightEye.y) / 2 };
-  const eyeWidth = Math.abs(rightEye.x - leftEye.x);
-  const noseOffset = (nose.x - eyeCenter.x) / eyeWidth;
-  const yaw = noseOffset * 60; // Approximate yaw in degrees
-  
-  // Calculate roll (head tilt) using eye line angle
-  const eyeAngle = Math.atan2(rightEye.y - leftEye.y, rightEye.x - leftEye.x);
-  const roll = (eyeAngle * 180) / Math.PI;
-  
-  // Calculate pitch (up-down) using nose-chin vs nose-forehead ratio
-  const noseToForehead = Math.abs(nose.y - foreheadApprox.y);
-  const noseToChin = Math.abs(chin.y - nose.y);
-  const pitchRatio = (noseToChin - noseToForehead) / (noseToChin + noseToForehead);
-  const pitch = pitchRatio * 45; // Approximate pitch in degrees
-  
-  return { pitch, yaw, roll };
+  return estimateHeadPose(landmarks);
 };
 
 /**
- * Estimate which angle category a face is at
+ * Estimate which angle category a face is at from head pose
  */
-export const estimateFaceAngleCategory = (
-  landmarks: faceapi.FaceLandmarks68
+export const estimateFaceAngleCategoryFromPose = (
+  pose: { pitch: number; yaw: number; roll: number }
 ): FaceAngle => {
-  const { yaw } = estimateFaceAngle(landmarks);
+  const { yaw } = pose;
   
   if (Math.abs(yaw) < 10) return "front";
   if (yaw < -25) return "left";
@@ -328,9 +325,9 @@ const calculateBrightness = (context: CanvasRenderingContext2D, width: number, h
 };
 
 /**
- * Validate face quality for enrollment
+ * Validate face quality for enrollment (MediaPipe version)
  */
-export const validateFaceQuality = (
+export const validateFaceQualityFromMediaPipe = (
   detection: DetectionResult,
   context?: CanvasRenderingContext2D,
   width?: number,
@@ -374,17 +371,40 @@ export const validateFaceQuality = (
   }
   
   // Check face angle if landmarks available
+  // Note: pitch is 90° when straight, >90° = up, <90° = down
   let angleDetails = { pitch: 0, yaw: 0, roll: 0, valid: true };
   if (detection.landmarks) {
     const angles = estimateFaceAngle(detection.landmarks);
+    // Check deviation from ideal angles: yaw=0, pitch=90, roll=0
+    const pitchDeviation = Math.abs(angles.pitch - 90);
     angleDetails = {
       ...angles,
       valid: Math.abs(angles.yaw) <= QUALITY_THRESHOLDS.MAX_FACE_ANGLE &&
-             Math.abs(angles.pitch) <= QUALITY_THRESHOLDS.MAX_FACE_ANGLE &&
+             pitchDeviation <= QUALITY_THRESHOLDS.MAX_FACE_ANGLE &&
              Math.abs(angles.roll) <= 30,
     };
     if (!angleDetails.valid) {
-      issues.push("มุมใบหน้าเอียงมากเกินไป");
+      // Provide specific guidance based on which angle is off
+      const angleIssues: string[] = [];
+      if (Math.abs(angleDetails.yaw) > QUALITY_THRESHOLDS.MAX_FACE_ANGLE) {
+        if (angleDetails.yaw > 0) {
+          angleIssues.push("หันหน้าไปทางขวาเกินไป - กรุณาหันหน้าไปทางซ้ายเล็กน้อย");
+        } else {
+          angleIssues.push("หันหน้าไปทางซ้ายเกินไป - กรุณาหันหน้าไปทางขวาเล็กน้อย");
+        }
+      }
+      if (pitchDeviation > QUALITY_THRESHOLDS.MAX_FACE_ANGLE) {
+        // pitch > 90 = looking up, pitch < 90 = looking down
+        if (angleDetails.pitch > 90) {
+          angleIssues.push("เงยหน้าขึ้นเกินไป - กรุณาก้มหน้าลงเล็กน้อย");
+        } else {
+          angleIssues.push("ก้มหน้าลงเกินไป - กรุณาเงยหน้าขึ้นเล็กน้อย");
+        }
+      }
+      if (Math.abs(angleDetails.roll) > 30) {
+        angleIssues.push("เอียงหัวไปข้างหนึ่ง - กรุณาตั้งหัวให้ตรง");
+      }
+      issues.push(...(angleIssues.length > 0 ? angleIssues : ["มุมใบหน้าเอียงมากเกินไป - กรุณาหันหน้าเข้าหากล้องตรงๆ"]));
       score -= 0.2;
     }
   }
@@ -730,23 +750,27 @@ export const findBestMatchWithConfidenceGap = (
 
 /**
  * Align and normalize face for better embedding consistency
- * Uses affine transformation based on eye positions
+ * Uses affine transformation based on eye positions (MediaPipe version)
  */
 export const alignFace = async (
   video: HTMLVideoElement,
-  landmarks: faceapi.FaceLandmarks68,
+  landmarks: MediaPipeLandmark[],
   targetSize = 224
 ): Promise<HTMLCanvasElement> => {
-  const positions = landmarks.positions;
+  if (landmarks.length < 468) {
+    throw new Error("Insufficient landmarks for face alignment");
+  }
   
-  // Get eye centers
+  // Get eye centers from MediaPipe landmarks
+  // Left eye: landmarks[33] (outer), landmarks[133] (inner)
+  // Right eye: landmarks[362] (outer), landmarks[263] (inner)
   const leftEyeCenter = {
-    x: (positions[36].x + positions[39].x) / 2,
-    y: (positions[36].y + positions[39].y) / 2,
+    x: (landmarks[33].x + landmarks[133].x) / 2,
+    y: (landmarks[33].y + landmarks[133].y) / 2,
   };
   const rightEyeCenter = {
-    x: (positions[42].x + positions[45].x) / 2,
-    y: (positions[42].y + positions[45].y) / 2,
+    x: (landmarks[362].x + landmarks[263].x) / 2,
+    y: (landmarks[362].y + landmarks[263].y) / 2,
   };
   
   // Calculate rotation angle
@@ -789,4 +813,5 @@ export const alignFace = async (
 };
 
 // Re-export types
-export type { DetectionResult, FaceBox };
+export type { DetectionResult, FaceBox } from "./mediapipe-face-detection";
+export type { MediaPipeLandmark } from "./mediapipe-face-detection";

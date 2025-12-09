@@ -24,7 +24,7 @@ const embeddingsSchema = z.object({
 const employeeRowSchema = z.object({
   id: z.string(),
   full_name: z.string(),
-  email: z.string().email(),
+  email: z.string().email().or(z.string()), // Allow invalid emails to pass through
   role: z.string(),
   department: z.string().nullish(),
   avatar_url: z.string().url().nullish(),
@@ -99,7 +99,53 @@ class SupabaseEmployeeRepository implements EmployeeRepository {
       throw new Error(error.message);
     }
 
-    const rows = z.array(employeeRowSchema).parse(data);
+    // Use safeParse to handle validation errors gracefully
+    const parseResult = z.array(employeeRowSchema).safeParse(data);
+    if (!parseResult.success) {
+      console.warn("Employee data validation warning:", parseResult.error.issues);
+      // Try to parse with lenient schema for invalid emails
+      const lenientSchema = z.array(z.object({
+        id: z.string(),
+        full_name: z.string(),
+        email: z.string(), // Accept any string
+        role: z.string(),
+        department: z.string().nullish(),
+        avatar_url: z.string().nullish(),
+        last_check_in: z.string().nullish(),
+        embedding_version: z.string().nullish(),
+        embedding_vector: z.array(z.number()).nullish(),
+        embeddings_data: z.string().nullish(),
+      }));
+      const lenientResult = lenientSchema.safeParse(data);
+      if (lenientResult.success) {
+        const rows = lenientResult.data;
+        return rows.map((row) => ({
+          id: row.id,
+          fullName: row.full_name,
+          email: row.email || "", // Default to empty string
+          role: row.role,
+          department: row.department ?? undefined,
+          avatarUrl: row.avatar_url ?? undefined,
+          lastCheckIn: row.last_check_in ?? undefined,
+          embedding:
+            row.embedding_vector && row.embedding_version
+              ? {
+                  version: row.embedding_version as FaceEmbedding["version"],
+                  createdAt: row.last_check_in ?? new Date().toISOString(),
+                  source: "camera" as const,
+                  vector: row.embedding_vector,
+                }
+              : undefined,
+          embeddings: row.embeddings_data
+            ? (typeof row.embeddings_data === "string"
+                ? JSON.parse(row.embeddings_data)
+                : row.embeddings_data)
+            : undefined,
+        }));
+      }
+      throw new Error(`Failed to parse employee data: ${parseResult.error.message}`);
+    }
+    const rows = parseResult.data;
 
     return rows.map((row) => ({
       id: row.id,
