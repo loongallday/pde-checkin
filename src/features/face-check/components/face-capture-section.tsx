@@ -16,7 +16,6 @@ interface FaceCaptureSectionProps {
   isDetecting: boolean;
   detectedFaces?: DetectedFace[];
   getVideoDimensions?: () => { width: number; height: number };
-  livenessScore?: number;
   onInitializeCamera: () => Promise<void | boolean>;
   onStartDetection: () => void;
   onStopDetection: () => void;
@@ -41,7 +40,6 @@ export const FaceCaptureSection = ({
   isDetecting,
   detectedFaces = [],
   getVideoDimensions,
-  livenessScore = 0,
   onInitializeCamera,
   onStartDetection,
   onStopDetection,
@@ -51,7 +49,14 @@ export const FaceCaptureSection = ({
   const isCameraReady = phase === "camera-ready" || phase === "matched" || phase === "cooldown" || phase === "detecting";
   const isProcessing = phase === "camera-initializing" || phase === "loading-models" || phase === "loading-employees";
 
-  // Draw face bounding boxes on overlay canvas
+  // Smoothed face positions
+  interface SmoothedBox { x: number; y: number; w: number; h: number; opacity: number }
+  const smoothedBoxesRef = useRef<Map<string, SmoothedBox>>(new Map());
+  const SMOOTH_FACTOR = 0.25;
+  const FADE_SPEED = 0.15;
+  const animationRef = useRef<number | null>(null);
+
+  // Draw face bounding boxes with smooth interpolation
   const drawFaceOverlay = useCallback(() => {
     const canvas = overlayCanvasRef.current;
     const container = containerRef.current;
@@ -66,25 +71,58 @@ export const FaceCaptureSection = ({
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    if (detectedFaces.length === 0 || !getVideoDimensions) return;
+    if (!getVideoDimensions) return;
 
     const videoDims = getVideoDimensions();
     const scaleX = rect.width / videoDims.width;
     const scaleY = rect.height / videoDims.height;
 
+    const currentFaceIds = new Set<string>();
+
+    // Update smoothed positions
     for (const face of detectedFaces) {
-      const { boundingBox, employeeName, matchScore } = face;
-      
-      const x = boundingBox.x * scaleX;
-      const y = boundingBox.y * scaleY;
-      const w = boundingBox.width * scaleX;
-      const h = boundingBox.height * scaleY;
+      const { boundingBox, employeeId } = face;
+      const targetX = boundingBox.x * scaleX;
+      const targetY = boundingBox.y * scaleY;
+      const targetW = boundingBox.width * scaleX;
+      const targetH = boundingBox.height * scaleY;
 
-      const hasMatch = employeeName && matchScore && matchScore >= 0.7;
-      const borderColor = hasMatch ? "#22c55e" : "#3b82f6";
-      const bgColor = hasMatch ? "rgba(34, 197, 94, 0.15)" : "rgba(59, 130, 246, 0.1)";
+      const faceKey = employeeId || `face-${Math.round(boundingBox.x / 100)}-${Math.round(boundingBox.y / 100)}`;
+      currentFaceIds.add(faceKey);
 
-      // Draw face bounding box
+      const existing = smoothedBoxesRef.current.get(faceKey);
+      if (existing) {
+        existing.x += (targetX - existing.x) * SMOOTH_FACTOR;
+        existing.y += (targetY - existing.y) * SMOOTH_FACTOR;
+        existing.w += (targetW - existing.w) * SMOOTH_FACTOR;
+        existing.h += (targetH - existing.h) * SMOOTH_FACTOR;
+        existing.opacity = Math.min(1, existing.opacity + FADE_SPEED);
+      } else {
+        smoothedBoxesRef.current.set(faceKey, {
+          x: targetX, y: targetY, w: targetW, h: targetH, opacity: 0.3
+        });
+      }
+    }
+
+    // Fade out old faces
+    for (const [key, box] of smoothedBoxesRef.current.entries()) {
+      if (!currentFaceIds.has(key)) {
+        box.opacity -= FADE_SPEED;
+        if (box.opacity <= 0) smoothedBoxesRef.current.delete(key);
+      }
+    }
+
+    // Draw faces
+    for (const face of detectedFaces) {
+      const { boundingBox, employeeName, employeeId } = face;
+      const faceKey = employeeId || `face-${Math.round(boundingBox.x / 100)}-${Math.round(boundingBox.y / 100)}`;
+      const smoothed = smoothedBoxesRef.current.get(faceKey);
+      if (!smoothed) continue;
+
+      const { x, y, w, h, opacity } = smoothed;
+      const borderColor = employeeName ? `rgba(34, 197, 94, ${opacity})` : `rgba(59, 130, 246, ${opacity})`;
+      const bgColor = employeeName ? `rgba(34, 197, 94, ${0.15 * opacity})` : `rgba(59, 130, 246, ${0.1 * opacity})`;
+
       ctx.strokeStyle = borderColor;
       ctx.lineWidth = 3;
       ctx.fillStyle = bgColor;
@@ -104,80 +142,69 @@ export const FaceCaptureSection = ({
       ctx.fill();
       ctx.stroke();
 
-      // Draw corner accents
+      // Corner accents
       const cornerLength = Math.min(25, w * 0.2, h * 0.2);
       ctx.lineWidth = 5;
       ctx.lineCap = "round";
-
-      // Top-left corner
       ctx.beginPath();
-      ctx.moveTo(x, y + cornerLength);
-      ctx.lineTo(x, y);
-      ctx.lineTo(x + cornerLength, y);
+      ctx.moveTo(x, y + cornerLength); ctx.lineTo(x, y); ctx.lineTo(x + cornerLength, y);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(x + w - cornerLength, y); ctx.lineTo(x + w, y); ctx.lineTo(x + w, y + cornerLength);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(x, y + h - cornerLength); ctx.lineTo(x, y + h); ctx.lineTo(x + cornerLength, y + h);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(x + w - cornerLength, y + h); ctx.lineTo(x + w, y + h); ctx.lineTo(x + w, y + h - cornerLength);
       ctx.stroke();
 
-      // Top-right corner
-      ctx.beginPath();
-      ctx.moveTo(x + w - cornerLength, y);
-      ctx.lineTo(x + w, y);
-      ctx.lineTo(x + w, y + cornerLength);
-      ctx.stroke();
-
-      // Bottom-left corner
-      ctx.beginPath();
-      ctx.moveTo(x, y + h - cornerLength);
-      ctx.lineTo(x, y + h);
-      ctx.lineTo(x + cornerLength, y + h);
-      ctx.stroke();
-
-      // Bottom-right corner
-      ctx.beginPath();
-      ctx.moveTo(x + w - cornerLength, y + h);
-      ctx.lineTo(x + w, y + h);
-      ctx.lineTo(x + w, y + h - cornerLength);
-      ctx.stroke();
-
-      // Draw name label if available
-      if (employeeName) {
+      if (employeeName && opacity > 0.5) {
         const fontSize = Math.max(16, Math.min(24, w * 0.1));
         ctx.font = `bold ${fontSize}px Inter, system-ui, sans-serif`;
-        
-        const scoreText = matchScore ? ` ${Math.round(matchScore * 100)}%` : "";
-        const labelText = employeeName + scoreText;
-        const textMetrics = ctx.measureText(labelText);
-        const textWidth = textMetrics.width;
-        const textHeight = fontSize;
+        const textMetrics = ctx.measureText(employeeName);
         const padding = 10;
         const labelX = x;
-        const labelY = y - textHeight - padding * 2 - 6;
+        const labelY = y - fontSize - padding * 2 - 6;
 
-        // Label background
         ctx.fillStyle = borderColor;
-        ctx.beginPath();
         const labelRadius = 8;
+        ctx.beginPath();
         ctx.moveTo(labelX + labelRadius, labelY);
-        ctx.lineTo(labelX + textWidth + padding * 2 - labelRadius, labelY);
-        ctx.quadraticCurveTo(labelX + textWidth + padding * 2, labelY, labelX + textWidth + padding * 2, labelY + labelRadius);
-        ctx.lineTo(labelX + textWidth + padding * 2, labelY + textHeight + padding * 2 - labelRadius);
-        ctx.quadraticCurveTo(labelX + textWidth + padding * 2, labelY + textHeight + padding * 2, labelX + textWidth + padding * 2 - labelRadius, labelY + textHeight + padding * 2);
-        ctx.lineTo(labelX + labelRadius, labelY + textHeight + padding * 2);
-        ctx.quadraticCurveTo(labelX, labelY + textHeight + padding * 2, labelX, labelY + textHeight + padding * 2 - labelRadius);
+        ctx.lineTo(labelX + textMetrics.width + padding * 2 - labelRadius, labelY);
+        ctx.quadraticCurveTo(labelX + textMetrics.width + padding * 2, labelY, labelX + textMetrics.width + padding * 2, labelY + labelRadius);
+        ctx.lineTo(labelX + textMetrics.width + padding * 2, labelY + fontSize + padding * 2 - labelRadius);
+        ctx.quadraticCurveTo(labelX + textMetrics.width + padding * 2, labelY + fontSize + padding * 2, labelX + textMetrics.width + padding * 2 - labelRadius, labelY + fontSize + padding * 2);
+        ctx.lineTo(labelX + labelRadius, labelY + fontSize + padding * 2);
+        ctx.quadraticCurveTo(labelX, labelY + fontSize + padding * 2, labelX, labelY + fontSize + padding * 2 - labelRadius);
         ctx.lineTo(labelX, labelY + labelRadius);
         ctx.quadraticCurveTo(labelX, labelY, labelX + labelRadius, labelY);
         ctx.closePath();
         ctx.fill();
 
-        // Label text
-        ctx.fillStyle = "#ffffff";
+        ctx.fillStyle = `rgba(255, 255, 255, ${opacity})`;
         ctx.textBaseline = "top";
-        ctx.fillText(labelText, labelX + padding, labelY + padding);
+        ctx.fillText(employeeName, labelX + padding, labelY + padding);
       }
     }
   }, [detectedFaces, getVideoDimensions]);
 
+  // Animation loop for smooth rendering
   useEffect(() => {
-    drawFaceOverlay();
-  }, [drawFaceOverlay]);
+    if (isDetecting) {
+      const animate = () => {
+        drawFaceOverlay();
+        animationRef.current = requestAnimationFrame(animate);
+      };
+      animationRef.current = requestAnimationFrame(animate);
+      return () => {
+        if (animationRef.current) cancelAnimationFrame(animationRef.current);
+      };
+    } else {
+      smoothedBoxesRef.current.clear();
+      drawFaceOverlay();
+    }
+  }, [isDetecting, drawFaceOverlay]);
 
   useEffect(() => {
     const handleResize = () => drawFaceOverlay();
@@ -262,32 +289,15 @@ export const FaceCaptureSection = ({
                 </div>
               )}
               
-              {/* Status indicators */}
-              <div className="absolute bottom-3 left-3 right-3 flex items-center justify-between">
-                {/* Face detected indicator */}
-                {isDetecting && detectedFaces.length > 0 && (
+              {/* Status indicator */}
+              {isDetecting && detectedFaces.length > 0 && (
+                <div className="absolute bottom-3 left-3">
                   <div className="rounded-full bg-green-500/90 px-3 py-1.5 text-xs font-medium text-white shadow-lg flex items-center gap-1.5">
                     <span className="h-2 w-2 rounded-full bg-white animate-pulse" />
-                    ตรวจพบใบหน้า
+                    ตรวจพบใบหน้า {detectedFaces.length > 1 ? `(${detectedFaces.length})` : ""}
                   </div>
-                )}
-                
-                {/* Liveness indicator */}
-                {isDetecting && detectedFaces.length > 0 && (
-                  <div className="rounded-full bg-black/60 px-3 py-1.5 text-xs text-white shadow-lg flex items-center gap-2">
-                    <span>ความปลอดภัย</span>
-                    <div className="w-12 h-1.5 bg-white/30 rounded-full overflow-hidden">
-                      <div 
-                        className={cn(
-                          "h-full rounded-full transition-all duration-300",
-                          livenessScore >= 0.5 ? "bg-green-400" : "bg-yellow-400"
-                        )}
-                        style={{ width: `${livenessScore * 100}%` }}
-                      />
-                    </div>
-                  </div>
-                )}
-              </div>
+                </div>
+              )}
               
               {/* Cooldown overlay */}
               {phase === "cooldown" && (

@@ -5,6 +5,7 @@ import {
   areModelsLoaded,
   detectSingleFaceWithDescriptor,
   detectFaces,
+  detectFacesFast,
   compareFaceDescriptors,
   descriptorToArray,
   DETECTION_CONFIG,
@@ -125,23 +126,161 @@ export const captureEmbeddingFromVideoAsync = async (
   };
 };
 
+// Cache for stable face tracking - only extract descriptors for faces that persist
+interface TrackedFace {
+  box: FaceBoundingBox;
+  frameCount: number;
+  lastEmbedding?: number[];
+  lastEmbeddingTime: number;
+}
+const trackedFacesCache = new Map<string, TrackedFace>();
+const EMBEDDING_REFRESH_MS = 500; // Only re-extract embedding every 500ms per face
+const MIN_FRAMES_FOR_EMBEDDING = 2; // Need 2 frames before extracting embedding
+
+// Generate a stable key for a face based on position
+const getFaceKey = (box: FaceBoundingBox): string => {
+  // Round to ~50px grid for stability
+  const gridX = Math.round(box.x / 50);
+  const gridY = Math.round(box.y / 50);
+  return `${gridX}_${gridY}`;
+};
+
+// Check if two boxes overlap significantly (same face)
+const boxesOverlap = (a: FaceBoundingBox, b: FaceBoundingBox): boolean => {
+  const overlapX = Math.max(0, Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x));
+  const overlapY = Math.max(0, Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y));
+  const overlapArea = overlapX * overlapY;
+  const aArea = a.width * a.height;
+  return overlapArea / aArea > 0.5;
+};
+
 /**
- * Detect multiple faces in video (for kiosk)
+ * Detect multiple faces in video (OPTIMIZED for kiosk)
+ * Uses TinyFaceDetector for fast box detection, only extracts descriptors for stable faces
  */
 export const detectMultipleFaces = async (
   video: HTMLVideoElement
 ): Promise<Array<{ box: FaceBoundingBox; score: number; embedding: number[] }>> => {
   if (!video || video.readyState < 2) return [];
 
-  const detections = await detectFaces(video);
+  const now = Date.now();
+
+  // Step 1: Fast detection for all face boxes (TinyFaceDetector ~15ms)
+  const fastDetections = await detectFacesFast(video);
   
-  return detections
-    .filter(d => d.descriptor && d.score >= DETECTION_CONFIG.MIN_CONFIDENCE)
-    .map(d => ({
-      box: d.box,
-      score: d.score,
-      embedding: d.descriptor ? descriptorToArray(d.descriptor) : [],
-    }));
+  if (fastDetections.length === 0) {
+    trackedFacesCache.clear();
+    return [];
+  }
+
+  // Step 2: Update tracked faces
+  const currentFaceKeys = new Set<string>();
+  const results: Array<{ box: FaceBoundingBox; score: number; embedding: number[] }> = [];
+  const facesNeedingEmbedding: FaceBoundingBox[] = [];
+
+  for (const detection of fastDetections) {
+    if (detection.score < 0.4 || detection.box.width < 40) continue;
+
+    const key = getFaceKey(detection.box);
+    currentFaceKeys.add(key);
+
+    let tracked = trackedFacesCache.get(key);
+    
+    // Try to find existing tracked face that overlaps
+    if (!tracked) {
+      for (const [existingKey, existingFace] of trackedFacesCache) {
+        if (boxesOverlap(detection.box, existingFace.box)) {
+          tracked = existingFace;
+          trackedFacesCache.delete(existingKey);
+          break;
+        }
+      }
+    }
+
+    if (tracked) {
+      // Update existing tracked face
+      tracked.box = detection.box;
+      tracked.frameCount++;
+      
+      // Check if we need to refresh embedding
+      const needsEmbedding = !tracked.lastEmbedding || 
+        (now - tracked.lastEmbeddingTime > EMBEDDING_REFRESH_MS);
+      
+      if (needsEmbedding && tracked.frameCount >= MIN_FRAMES_FOR_EMBEDDING) {
+        facesNeedingEmbedding.push(detection.box);
+      }
+      
+      trackedFacesCache.set(key, tracked);
+      
+      // Return with cached or empty embedding
+      results.push({
+        box: detection.box,
+        score: detection.score,
+        embedding: tracked.lastEmbedding || [],
+      });
+    } else {
+      // New face - track it but don't extract embedding yet
+      trackedFacesCache.set(key, {
+        box: detection.box,
+        frameCount: 1,
+        lastEmbeddingTime: 0,
+      });
+      
+      results.push({
+        box: detection.box,
+        score: detection.score,
+        embedding: [],
+      });
+    }
+  }
+
+  // Step 3: Clean up old tracked faces
+  for (const [key] of trackedFacesCache) {
+    if (!currentFaceKeys.has(key)) {
+      trackedFacesCache.delete(key);
+    }
+  }
+
+  // Step 4: Extract embeddings for faces that need it (max 2 at a time for performance)
+  if (facesNeedingEmbedding.length > 0) {
+    // Use full detection for embedding extraction (only for faces needing it)
+    const fullDetections = await detectFaces(video);
+    
+    for (const fullDet of fullDetections) {
+      if (!fullDet.descriptor) continue;
+      
+      // Find matching result by box overlap
+      for (let i = 0; i < results.length; i++) {
+        if (boxesOverlap(results[i].box, fullDet.box)) {
+          const embedding = descriptorToArray(fullDet.descriptor);
+          results[i].embedding = embedding;
+          
+          // Update cache
+          const key = getFaceKey(results[i].box);
+          const tracked = trackedFacesCache.get(key);
+          if (tracked) {
+            tracked.lastEmbedding = embedding;
+            tracked.lastEmbeddingTime = now;
+          }
+          break;
+        }
+      }
+    }
+  }
+
+  return results.filter(r => r.score >= 0.5);
+};
+
+// Cache Float32Array conversions for performance
+const float32Cache = new WeakMap<number[], Float32Array>();
+const toFloat32 = (arr: number[] | Float32Array): Float32Array => {
+  if (arr instanceof Float32Array) return arr;
+  let cached = float32Cache.get(arr);
+  if (!cached) {
+    cached = new Float32Array(arr);
+    float32Cache.set(arr, cached);
+  }
+  return cached;
 };
 
 /**
@@ -152,11 +291,7 @@ export const compareFaces = (
   embedding2: number[] | Float32Array
 ): number => {
   if (embedding1.length === 0 || embedding2.length === 0) return Infinity;
-  
-  const e1 = embedding1 instanceof Float32Array ? embedding1 : new Float32Array(embedding1);
-  const e2 = embedding2 instanceof Float32Array ? embedding2 : new Float32Array(embedding2);
-  
-  return compareFaceDescriptors(e1, e2);
+  return compareFaceDescriptors(toFloat32(embedding1), toFloat32(embedding2));
 };
 
 /**
@@ -375,6 +510,7 @@ export const findBestMatchWithConfidenceGap = (
 
 /**
  * Match multiple faces against employees (for kiosk multi-person detection)
+ * OPTIMIZED: Skips faces without embeddings, uses cached Float32Array
  */
 export const matchMultipleFaces = (
   faces: Array<{ box: FaceBoundingBox; score: number; embedding: number[] }>,
@@ -386,13 +522,23 @@ export const matchMultipleFaces = (
   }>,
   threshold: number = FACE_MATCH_THRESHOLD
 ): DetectedFace[] => {
+  // Pre-filter employees with embeddings
+  const enrolledEmployees = employees.filter(
+    emp => emp.embeddings?.entries?.length || emp.embedding?.vector?.length
+  );
+
   return faces.map(face => {
-    const match = findBestMatchMultiEmbedding(face.embedding, employees);
-    
     const detected: DetectedFace = {
       boundingBox: face.box,
       confidence: face.score,
     };
+
+    // Skip matching if no embedding available yet (still tracking)
+    if (face.embedding.length === 0 || enrolledEmployees.length === 0) {
+      return detected;
+    }
+    
+    const match = findBestMatchMultiEmbedding(face.embedding, enrolledEmployees);
     
     if (match && match.distance <= threshold) {
       detected.employeeId = match.employeeId;
